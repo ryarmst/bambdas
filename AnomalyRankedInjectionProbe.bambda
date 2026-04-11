@@ -1,0 +1,215 @@
+id: b3f8a1c2-74e9-4d5f-9e1a-2c7f0b843a6d
+name: Anomaly-Ranked Injection Probe
+function: SCAN_CHECK_ACTIVE_PER_INSERTION_POINT
+location: SCANNER
+source: |
+  /**
+   * Anomaly-Ranked Injection Probe — active, per insertion point.
+   * Sends a payload corpus, ranks all responses with RankingAlgorithm.ANOMALY,
+   * and raises MEDIUM / TENTATIVE only when both gates pass:
+   *   Gate 1 (absolute):  topRank >= RANK_THRESHOLD
+   *   Gate 2 (margin):    topRank >= MIN_MARGIN_OVER_MEDIAN * medianRank
+   * See AnomalyRankedInjectionProbe.md for tuning guidance.
+   **/
+
+  // === TUNABLE CONSTANTS ====================================================
+
+  final int    RANK_THRESHOLD                   = 5;    // int; empirical — see .md to calibrate
+  final double MIN_MARGIN_OVER_MEDIAN           = 2.0;  // primary noise gate; raise on WAF targets
+  final int    MAX_PAYLOADS_PER_INSERTION_POINT = 25;   // cap: (insertion points) * (payloads) per scan
+
+  final String ISSUE_NAME = "Anomalous response to injection probes";
+  final String ISSUE_BACKGROUND =
+      "<p>This check sends a corpus of diverse injection probes to a single " +
+      "insertion point and ranks every response — including the unmodified " +
+      "baseline — using Burp&rsquo;s built-in anomaly-detection algorithm " +
+      "(<code>RankingUtils.rank(..., RankingAlgorithm.ANOMALY)</code>). A " +
+      "finding is raised only when the top-ranked response stands out from " +
+      "the corpus median by a configurable margin, reducing noise caused by " +
+      "uniformly-unusual application behaviour (WAFs, CDNs, error-heavy APIs)." +
+      "</p><p>MEDIUM / TENTATIVE means one probe triggered a structurally " +
+      "distinct response. Manual review is required to determine exploitability. " +
+      "Common true-positive causes: SQL errors, command output leakage, template " +
+      "evaluation, path traversal disclosure, parser exceptions.</p>";
+
+  // === PAYLOAD CORPUS =======================================================
+  // Payloads are passed verbatim to buildHttpRequestWithPayload(), which
+  // applies context-appropriate encoding automatically. Do NOT pre-encode.
+  // Keep the corpus diverse — see .md for guidance on adding / removing entries.
+
+  final var PAYLOADS = java.util.List.of(
+      // ── Control (benign anchor) ───────────────────────────────────────────
+      "safe_control_string",
+
+      // ── SQL metacharacters ────────────────────────────────────────────────
+      "'",
+      "\"",
+      "' OR '1'='1",
+      "' OR 1=1--",
+      "1; SELECT SLEEP(0)--",
+
+      // ── Command injection ─────────────────────────────────────────────────
+      ";id",
+      "`id`",
+      "$(id)",
+      "|id",
+      "||id",
+
+      // ── Path traversal ────────────────────────────────────────────────────
+      "../../../../etc/passwd",
+      "..%2F..%2F..%2F..%2Fetc%2Fpasswd",
+      "....//....//....//etc/passwd",
+
+      // ── SSTI (Jinja/Twig, EL, ERB, Smarty) ───────────────────────────────
+      "{{7*7}}",
+      "${7*7}",
+      "<%= 7*7 %>",
+      "#{7*7}",
+
+      // ── Null byte ─────────────────────────────────────────────────────────
+      "value\u0000injected",
+
+      // ── Oversized (4 096 'A's) ────────────────────────────────────────────
+      "A".repeat(4096),
+
+      // ── Unicode / directional override ────────────────────────────────────
+      "\u202Ereversed",
+
+      // ── Numeric edge cases ────────────────────────────────────────────────
+      "-1",
+      "9999999999999999",
+
+      // ── Boolean / null literals ───────────────────────────────────────────
+      "true",
+      "false",
+      "null"
+  );
+
+  // === GUARD ================================================================
+
+  if (insertionPoint == null) return AuditResult.auditResult();
+  if (!requestResponse.hasResponse()) return AuditResult.auditResult();
+
+  final String ipName = insertionPoint.name();
+  final String ipType = insertionPoint.type().toString();
+
+  // === BUILD CORPUS =========================================================
+  // Baseline is always index 0 so the ranker has a "normal" reference.
+  // IdentityHashMap (== equality) maps each HttpRequestResponse back to its
+  // payload label without being confused by equal-but-distinct response objects.
+
+  var corpus   = new java.util.ArrayList<HttpRequestResponse>();
+  var labelMap = new java.util.IdentityHashMap<HttpRequestResponse, String>();
+
+  corpus.add(requestResponse);
+  labelMap.put(requestResponse, "<baseline>");
+
+  int sent = 0;
+  for (var payload : PAYLOADS) {
+      if (sent >= MAX_PAYLOADS_PER_INSERTION_POINT) break;
+      try {
+          var req = insertionPoint.buildHttpRequestWithPayload(ByteArray.byteArray(payload));
+          var rr  = http.sendRequest(req);
+          if (!rr.hasResponse()) continue;
+          corpus.add(rr);
+          labelMap.put(rr, payload);
+          sent++;
+      } catch (Exception e) {
+          api().logging().logToOutput(
+              "[AnomalyProbe] send error [" + ipName + "] payload=[" + payload + "]: " + e.getMessage()
+          );
+      }
+  }
+
+  if (corpus.size() < 3) return AuditResult.auditResult();
+
+  // === RANK =================================================================
+  // rank() returns an unsorted List<RankedHttpRequestResponse>.
+  // .rank() -> int: higher = more anomalous within this corpus.
+
+  java.util.List<burp.api.montoya.utilities.rank.RankedHttpRequestResponse> ranked = api().utilities().rankingUtils().rank(corpus, burp.api.montoya.utilities.rank.RankingAlgorithm.ANOMALY);
+  if (ranked == null || ranked.isEmpty()) return AuditResult.auditResult();
+
+  // Descending sort — ranked.get(0) is the most anomalous entry.
+  ranked.sort((a, b) -> Integer.compare(b.rank(), a.rank()));
+
+  // === MEDIAN ===============================================================
+  // Build a separate ascending int[] for the median so it is independent of
+  // the descending sort order above.
+
+  int n = ranked.size();
+  int[] sortedRanks = ranked.stream().mapToInt(r -> r.rank()).sorted().toArray();
+  double median = (n % 2 == 1)
+      ? sortedRanks[n / 2]
+      : (sortedRanks[n / 2 - 1] + (double) sortedRanks[n / 2]) / 2.0;
+
+  var    top      = ranked.get(0);
+  int    topRank  = top.rank();
+  double margin   = (median > 0.0) ? topRank / median : Double.MAX_VALUE;
+
+  String topLabel = labelMap.getOrDefault(top.requestResponse(), "<unknown>");
+
+  // === GATE CHECK ===========================================================
+
+  boolean gateAbsolute = topRank >= RANK_THRESHOLD;
+  boolean gateMargin   = margin  >= MIN_MARGIN_OVER_MEDIAN;
+  boolean raised       = gateAbsolute && gateMargin;
+
+  api().logging().logToOutput(String.format(
+      "[AnomalyProbe] %-30s %-22s payloads=%2d  topRank=%d  median=%.1f  margin=%5.2fx  gate1=%s gate2=%s  raised=%s",
+      ipName, ipType, sent, topRank, median, margin,
+      gateAbsolute ? "PASS" : "fail",
+      gateMargin   ? "PASS" : "fail",
+      raised ? "YES" : "no"
+  ));
+
+  if (!raised) return AuditResult.auditResult();
+
+  // === FINDING ==============================================================
+  // Issue title includes the parameter name so Burp's title+URL deduplication
+  // naturally produces one finding per insertion point.
+
+  var html   = api().utilities().htmlUtils();
+  var detail =
+      "<p>An anomalous response was detected at insertion point " +
+      "<code>" + html.encode(ipName) + "</code> " +
+      "(type: <code>" + html.encode(ipType) + "</code>).</p>" +
+      "<table>" +
+      "<tr><th>Metric</th><th>Value</th><th>Threshold</th><th>Gate</th></tr>" +
+      "<tr><td>Trigger payload</td>" +
+          "<td><code>" + html.encode(topLabel) + "</code></td>" +
+          "<td>&#8212;</td><td>&#8212;</td></tr>" +
+      "<tr><td>Anomaly rank</td>" +
+          "<td>" + topRank + "</td>" +
+          "<td>&ge;&nbsp;" + RANK_THRESHOLD + "</td>" +
+          "<td>" + (gateAbsolute ? "&#10003;&nbsp;PASS" : "&#10007;&nbsp;fail") + "</td></tr>" +
+      "<tr><td>Corpus median rank</td>" +
+          "<td>" + String.format("%.1f", median) + "</td>" +
+          "<td>&#8212;</td><td>&#8212;</td></tr>" +
+      "<tr><td>Margin over median</td>" +
+          "<td>" + String.format("%.2f", margin) + "x</td>" +
+          "<td>&ge;&nbsp;" + MIN_MARGIN_OVER_MEDIAN + "x</td>" +
+          "<td>" + (gateMargin ? "&#10003;&nbsp;PASS" : "&#10007;&nbsp;fail") + "</td></tr>" +
+      "<tr><td>Corpus size</td>" +
+          "<td>" + corpus.size() + " (incl. baseline)</td>" +
+          "<td>&#8212;</td><td>&#8212;</td></tr>" +
+      "</table>" +
+      "<p>Baseline and anomalous request/response are attached. Diff them to identify what changed.</p>";
+
+  return AuditResult.auditResult(
+      AuditIssue.auditIssue(
+          ISSUE_NAME + " [" + ipName + "]",
+          detail,
+          "<p>Investigate manually. If the anomalous response indicates server-side " +
+          "evaluation, error disclosure, file leakage, or a timing difference, treat " +
+          "as a potential injection vulnerability and apply appropriate remediation.</p>",
+          requestResponse.request().url(),
+          AuditIssueSeverity.MEDIUM,
+          AuditIssueConfidence.TENTATIVE,
+          ISSUE_BACKGROUND,
+          "",
+          AuditIssueSeverity.MEDIUM,
+          requestResponse,
+          top.requestResponse()
+      )
+  );
