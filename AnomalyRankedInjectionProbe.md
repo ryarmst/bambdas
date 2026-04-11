@@ -68,19 +68,31 @@ A useful calibration sweep: run the same scan with `MIN_MARGIN_OVER_MEDIAN` set 
 
 ## Managing the payload corpus
 
-Payloads are passed verbatim to `insertionPoint.buildHttpRequestWithPayload()`, which applies context-appropriate encoding automatically (URL-encoding for query params, JSON-escaping for body JSON fields, etc.). **Do not pre-encode payloads.**
+### Loading from a file (recommended)
 
-### Adding payloads
+Set the JVM system property `anomaly.probe.wordlist` to the absolute path of a wordlist file before starting Burp:
 
-Append entries to the `PAYLOADS` list. Group related payloads with a `// ──` category comment to keep the list readable. Increasing the corpus improves coverage but multiplies scan traffic: total requests ≈ insertion points × `min(PAYLOADS.size(), MAX_PAYLOADS_PER_INSERTION_POINT)`.
+```
+burpsuite_pro.jar -Danomaly.probe.wordlist=/path/to/payloads.txt
+```
 
-### Removing payloads
+Or on macOS via the launcher, add to the `vmoptions` file:
 
-Delete the line. **Always keep at least one known-benign control entry** (`"safe_control_string"`). Without a control, the ranker compares only attack payloads against each other. If they all trigger similar responses (e.g. all blocked by a WAF), the boundary entries will appear anomalous relative to each other and inflate scores, defeating the margin gate.
+```
+-Danomaly.probe.wordlist=/Users/you/wordlists/injection.txt
+```
+
+**File format:** one payload per line. Lines beginning with `#` and blank lines are ignored. The check logs the loaded count to Extensions → Output on first use.
+
+Payloads are passed verbatim to `insertionPoint.buildHttpRequestWithPayload()`, which applies context-appropriate encoding for the insertion point type automatically (URL-encoding for query params, JSON-escaping for body fields, etc.). **Do not pre-encode payloads in the file.**
+
+### Hardcoded fallback
+
+When `anomaly.probe.wordlist` is not set, or the file cannot be read, the check falls back to a list of URL-encoded ASCII characters (`%00`–`%7f`, focusing on security-relevant specials). This corpus probes how the application handles percent-encoded input — useful for surfacing double-decode bugs, WAF filter bypasses, and parser inconsistencies without requiring any external file.
 
 ### Corpus diversity
 
-Keep the corpus **diverse rather than deep in any one category**. Thirty SQLi variants that all trigger the same WAF block page produce a uniform corpus where no entry stands out — the margin gate correctly suppresses any finding, but you also lose signal. Mix SQL, command injection, path traversal, SSTI, and structural edge cases (oversized, null byte, unicode) to maximise the chance that a genuine server-side reaction is structurally distinct from the rest of the corpus.
+Keep the corpus **diverse rather than deep in any one category**. Thirty SQLi variants that all trigger the same WAF block page produce a uniform corpus where no entry stands out — the margin gate correctly suppresses any finding, but you also lose signal. Mix injection classes, structural edge cases, and at least one known-benign control entry so the ranker has a stable "normal" reference to compare against.
 
 ## Reading the output log
 

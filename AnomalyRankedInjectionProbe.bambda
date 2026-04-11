@@ -33,57 +33,58 @@ source: |
       "evaluation, path traversal disclosure, parser exceptions.</p>";
 
   // === PAYLOAD CORPUS =======================================================
-  // Payloads are passed verbatim to buildHttpRequestWithPayload(), which
-  // applies context-appropriate encoding automatically. Do NOT pre-encode.
-  // Keep the corpus diverse — see .md for guidance on adding / removing entries.
+  // System property to set at JVM startup: -Danomaly.probe.wordlist=/path/to/file
+  // File format: one payload per line; lines starting with # and blank lines ignored.
+  // If the property is absent or the file cannot be read, FALLBACK_PAYLOADS is used.
+  // Payloads are passed verbatim to buildHttpRequestWithPayload(), which applies
+  // context-appropriate encoding automatically. Do NOT pre-encode entries in the file.
+  final String WORDLIST_PROPERTY = "anomaly.probe.wordlist";
 
-  final var PAYLOADS = java.util.List.of(
-      // ── Control (benign anchor) ───────────────────────────────────────────
-      "safe_control_string",
-
-      // ── SQL metacharacters ────────────────────────────────────────────────
-      "'",
-      "\"",
-      "' OR '1'='1",
-      "' OR 1=1--",
-      "1; SELECT SLEEP(0)--",
-
-      // ── Command injection ─────────────────────────────────────────────────
-      ";id",
-      "`id`",
-      "$(id)",
-      "|id",
-      "||id",
-
-      // ── Path traversal ────────────────────────────────────────────────────
-      "../../../../etc/passwd",
-      "..%2F..%2F..%2F..%2Fetc%2Fpasswd",
-      "....//....//....//etc/passwd",
-
-      // ── SSTI (Jinja/Twig, EL, ERB, Smarty) ───────────────────────────────
-      "{{7*7}}",
-      "${7*7}",
-      "<%= 7*7 %>",
-      "#{7*7}",
-
-      // ── Null byte ─────────────────────────────────────────────────────────
-      "value\u0000injected",
-
-      // ── Oversized (4 096 'A's) ────────────────────────────────────────────
-      "A".repeat(4096),
-
-      // ── Unicode / directional override ────────────────────────────────────
-      "\u202Ereversed",
-
-      // ── Numeric edge cases ────────────────────────────────────────────────
-      "-1",
-      "9999999999999999",
-
-      // ── Boolean / null literals ───────────────────────────────────────────
-      "true",
-      "false",
-      "null"
+  // Hardcoded fallback: URL-encoded forms of ASCII characters commonly significant
+  // in web security contexts. Tests how the application handles percent-encoded input —
+  // relevant for double-decode bugs, filter bypasses, and parser inconsistencies.
+  final var FALLBACK_PAYLOADS = java.util.List.of(
+      "%00",  // null byte
+      "%09",  // tab
+      "%0a",  // line feed
+      "%0d",  // carriage return
+      "%20",  // space
+      "%22",  // "
+      "%23",  // #
+      "%25",  // % (self-referential; triggers double-decode bugs)
+      "%26",  // &
+      "%27",  // '
+      "%2b",  // +
+      "%2f",  // /
+      "%3b",  // ;
+      "%3c",  // <
+      "%3d",  // =
+      "%3e",  // >
+      "%3f",  // ?
+      "%40",  // @
+      "%5c",  // \
+      "%60",  // `
+      "%7c",  // |
+      "%7e",  // ~
+      "%7f"   // DEL
   );
+
+  // Attempt to load from file; fall back to FALLBACK_PAYLOADS on any failure.
+  var PAYLOADS = FALLBACK_PAYLOADS;
+  var _wordlistPath = System.getProperty(WORDLIST_PROPERTY);
+  if (_wordlistPath != null) {
+      try {
+          var _loaded = java.nio.file.Files.readAllLines(java.nio.file.Paths.get(_wordlistPath))
+              .stream()
+              .map(String::trim)
+              .filter(l -> !l.isEmpty() && !l.startsWith("#"))
+              .toList();
+          PAYLOADS = _loaded;
+          api().logging().logToOutput("[AnomalyProbe] loaded " + PAYLOADS.size() + " payloads from: " + _wordlistPath);
+      } catch (Exception e) {
+          api().logging().logToOutput("[AnomalyProbe] wordlist load failed (" + e.getMessage() + "), using fallback");
+      }
+  }
 
   // === GUARD ================================================================
 
@@ -174,26 +175,13 @@ source: |
       "<p>An anomalous response was detected at insertion point " +
       "<code>" + html.encode(ipName) + "</code> " +
       "(type: <code>" + html.encode(ipType) + "</code>).</p>" +
-      "<table>" +
-      "<tr><th>Metric</th><th>Value</th><th>Threshold</th><th>Gate</th></tr>" +
-      "<tr><td>Trigger payload</td>" +
-          "<td><code>" + html.encode(topLabel) + "</code></td>" +
-          "<td>&#8212;</td><td>&#8212;</td></tr>" +
-      "<tr><td>Anomaly rank</td>" +
-          "<td>" + topRank + "</td>" +
-          "<td>&ge;&nbsp;" + RANK_THRESHOLD + "</td>" +
-          "<td>" + (gateAbsolute ? "&#10003;&nbsp;PASS" : "&#10007;&nbsp;fail") + "</td></tr>" +
-      "<tr><td>Corpus median rank</td>" +
-          "<td>" + String.format("%.1f", median) + "</td>" +
-          "<td>&#8212;</td><td>&#8212;</td></tr>" +
-      "<tr><td>Margin over median</td>" +
-          "<td>" + String.format("%.2f", margin) + "x</td>" +
-          "<td>&ge;&nbsp;" + MIN_MARGIN_OVER_MEDIAN + "x</td>" +
-          "<td>" + (gateMargin ? "&#10003;&nbsp;PASS" : "&#10007;&nbsp;fail") + "</td></tr>" +
-      "<tr><td>Corpus size</td>" +
-          "<td>" + corpus.size() + " (incl. baseline)</td>" +
-          "<td>&#8212;</td><td>&#8212;</td></tr>" +
-      "</table>" +
+      "<ul>" +
+      "<li><b>Trigger payload:</b> <code>" + html.encode(topLabel) + "</code></li>" +
+      "<li><b>Anomaly rank:</b> " + topRank + " (gate: &ge;&nbsp;" + RANK_THRESHOLD + " &mdash; " + (gateAbsolute ? "PASS" : "FAIL") + ")</li>" +
+      "<li><b>Corpus median rank:</b> " + String.format("%.1f", median) + "</li>" +
+      "<li><b>Margin over median:</b> " + String.format("%.2f", margin) + "x (gate: &ge;&nbsp;" + MIN_MARGIN_OVER_MEDIAN + "x &mdash; " + (gateMargin ? "PASS" : "FAIL") + ")</li>" +
+      "<li><b>Corpus size:</b> " + corpus.size() + " requests (incl. baseline)</li>" +
+      "</ul>" +
       "<p>Baseline and anomalous request/response are attached. Diff them to identify what changed.</p>";
 
   return AuditResult.auditResult(
