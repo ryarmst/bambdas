@@ -12,11 +12,27 @@ source: |
    * See AnomalyRankedInjectionProbe.md for tuning guidance.
    **/
 
-  // === TUNABLE CONSTANTS ====================================================
-
-  final int    RANK_THRESHOLD                   = 5;    // int; empirical — see .md to calibrate
-  final double MIN_MARGIN_OVER_MEDIAN           = 2.0;  // primary noise gate; raise on WAF targets
-  final int    MAX_PAYLOADS_PER_INSERTION_POINT = 25;   // cap: (insertion points) * (payloads) per scan
+  // === BURP GLOBALS =========================================================
+  // Required:
+  //   bambda-fuzzing                (boolean: "true"/"false") — master on/off for fuzzing checks
+  // Optional:
+  //   anomaly-probe-wordlist        (string) — absolute path to payload file; one entry per line,
+  //                                 lines starting with # ignored; falls back to built-in list
+  //   anomaly-probe-rank-threshold  (int, default "5")   — minimum raw anomaly rank (Gate 1);
+  //                                 calibrate empirically — see AnomalyRankedInjectionProbe.md
+  //   anomaly-probe-margin          (double, default "2.0") — top-rank / median multiplier (Gate 2);
+  //                                 raise toward 3.0 on WAF targets, lower toward 1.5 if missing findings
+  //   anomaly-probe-max-payloads    (int, default "25") — payload cap per insertion point
+  // Import globals.csv via Burp Globals → Options → Import variables.
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-fuzzing"))) {
+      return AuditResult.auditResult();
+  }
+  final int    RANK_THRESHOLD                   = Integer.parseInt(
+      java.util.Objects.requireNonNullElse(System.getProperty("bg.anomaly-probe-rank-threshold"), "5"));
+  final double MIN_MARGIN_OVER_MEDIAN           = Double.parseDouble(
+      java.util.Objects.requireNonNullElse(System.getProperty("bg.anomaly-probe-margin"), "2.0"));
+  final int    MAX_PAYLOADS_PER_INSERTION_POINT = Integer.parseInt(
+      java.util.Objects.requireNonNullElse(System.getProperty("bg.anomaly-probe-max-payloads"), "25"));
 
   final String ISSUE_NAME = "Anomalous response to injection probes";
   final String ISSUE_BACKGROUND =
@@ -33,12 +49,11 @@ source: |
       "evaluation, path traversal disclosure, parser exceptions.</p>";
 
   // === PAYLOAD CORPUS =======================================================
-  // System property to set at JVM startup: -Danomaly.probe.wordlist=/path/to/file
+  // Set bg.anomaly-probe-wordlist in Burp Globals to load a custom payload file.
   // File format: one payload per line; lines starting with # and blank lines ignored.
-  // If the property is absent or the file cannot be read, FALLBACK_PAYLOADS is used.
+  // If the global is absent or the file cannot be read, FALLBACK_PAYLOADS is used.
   // Payloads are passed verbatim to buildHttpRequestWithPayload(), which applies
   // context-appropriate encoding automatically. Do NOT pre-encode entries in the file.
-  final String WORDLIST_PROPERTY = "anomaly.probe.wordlist";
 
   // Hardcoded fallback: URL-encoded forms of ASCII characters commonly significant
   // in web security contexts. Tests how the application handles percent-encoded input —
@@ -71,7 +86,7 @@ source: |
 
   // Attempt to load from file; fall back to FALLBACK_PAYLOADS on any failure.
   var PAYLOADS = FALLBACK_PAYLOADS;
-  var _wordlistPath = System.getProperty(WORDLIST_PROPERTY);
+  var _wordlistPath = System.getProperty("bg.anomaly-probe-wordlist");
   if (_wordlistPath != null) {
       try {
           var _loaded = java.nio.file.Files.readAllLines(java.nio.file.Paths.get(_wordlistPath))
