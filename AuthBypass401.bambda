@@ -1,0 +1,242 @@
+id: e5b1c3d7-9a2f-4e8c-b4d6-7f0e2a1c5b9e
+name: 401 Authentication Bypass — Comprehensive Probe Suite
+function: SCAN_CHECK_ACTIVE_PER_REQUEST
+location: SCANNER
+source: |
+  /**
+   * 401 Authentication Bypass — Comprehensive Probe Suite
+   *
+   * Only fires when the base request returns HTTP 401.
+   * Fires targeted probes across five bypass categories and reports any
+   * probe that receives a 2xx response, with the technique clearly labelled.
+   *
+   * Categories
+   * ──────────
+   *   A. Trusted-source IP spoofing  — loopback/internal-IP headers
+   *   B. Path override headers       — X-Original-URL, X-Rewrite-URL
+   *   C. Path mutations              — double-slash, trailing slash,
+   *                                    dot-segment, semicolon, uppercase,
+   *                                    .json extension
+   *   D. HTTP method overrides       — X-HTTP-Method-Override headers, HEAD
+   *   E. Host / protocol spoofing    — X-Forwarded-Host, X-Forwarded-Proto,
+   *                                    X-Host
+   *
+   * Detection: any probe returning a 2xx status against the 401 base is
+   * flagged HIGH / FIRM. Verify the response body is the protected resource
+   * and not an alternate error page.
+   *
+   * @author burp-bambdas skill
+   **/
+
+  // ── GATE: only run against 401 base responses ─────────────────────────────
+  if (!requestResponse.hasResponse()) {
+      return AuditResult.auditResult();
+  }
+  if (requestResponse.response().statusCode() != 401) {
+      return AuditResult.auditResult();
+  }
+
+  // ── BASE REQUEST DETAILS ──────────────────────────────────────────────────
+  var baseReq  = requestResponse.request();
+  var basePath = baseReq.pathWithoutQuery();
+  var fullPath = baseReq.path();
+  var query    = fullPath.contains("?") ? fullPath.substring(fullPath.indexOf("?")) : "";
+  var method   = baseReq.method();
+
+  // ── RESULT ACCUMULATOR ────────────────────────────────────────────────────
+  record Finding(String name, String category, HttpRequestResponse rr) {}
+  var findings = new java.util.ArrayList<Finding>();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP A: Trusted-source IP spoofing
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Many applications use client-supplied IP headers to whitelist internal or
+  // loopback addresses. Injecting 127.0.0.1 into these headers may satisfy
+  // an IP-based auth check without valid credentials.
+
+  var ipHeaders = new String[][]{
+      {"X-Forwarded-For",           "127.0.0.1"},
+      {"X-Real-IP",                 "127.0.0.1"},
+      {"X-Remote-Addr",             "127.0.0.1"},
+      {"X-Client-IP",               "127.0.0.1"},
+      {"True-Client-IP",            "127.0.0.1"},
+      {"X-Custom-IP-Authorization", "127.0.0.1"},
+      {"X-Originating-IP",          "127.0.0.1"},
+      {"Forwarded",                 "for=127.0.0.1"},
+  };
+
+  for (var h : ipHeaders) {
+      var rr = http.sendRequest(baseReq.withHeader(h[0], h[1]));
+      if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+          findings.add(new Finding(h[0] + ": " + h[1], "Trusted-Source IP Spoofing", rr));
+      }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP B: Path override headers
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Certain frameworks (Symfony, Spring MVC, some reverse-proxy configs) honour
+  // these headers to re-route the internal request target AFTER the front
+  // controller has completed its auth check. The auth check sees the original
+  // (benign) path; the router ultimately handles the overridden path.
+
+  var pathOverrideHeaders = new String[][]{
+      {"X-Original-URL", basePath},
+      {"X-Rewrite-URL",  basePath},
+  };
+
+  for (var h : pathOverrideHeaders) {
+      var rr = http.sendRequest(baseReq.withHeader(h[0], h[1]));
+      if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+          findings.add(new Finding(h[0] + ": " + h[1], "Path Override Header", rr));
+      }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP C: Path mutations
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Auth middleware and the router may normalise URL paths differently.
+  // A mutated path that the router resolves to the same resource may not match
+  // the pattern the auth check tests against.
+
+  var pathMutations = new java.util.LinkedHashMap<String, String>();
+
+  // Double-slash prefix — some auth filters match on /api/* but not //api/*
+  pathMutations.put("double-slash prefix",  "/" + basePath + query);
+
+  // Trailing slash — auth rules using exact path matching may miss /path/
+  if (!basePath.endsWith("/")) {
+      pathMutations.put("trailing slash", basePath + "/" + query);
+  }
+
+  // Dot-segment insertion — /./path normalises to /path at the router
+  pathMutations.put("dot-segment insertion", basePath.replaceFirst("/", "/./") + query);
+
+  // Semicolon suffix — Spring / Java EE path parameter bypass (;jsessionid= style)
+  pathMutations.put("semicolon suffix", basePath + ";" + query);
+
+  // .json extension — some frameworks apply different auth rules per extension
+  pathMutations.put(".json extension", basePath + ".json" + query);
+
+  // Uppercase path — case-sensitive auth rules on case-insensitive routers
+  if (!basePath.equals(basePath.toUpperCase())) {
+      pathMutations.put("uppercase path", basePath.toUpperCase() + query);
+  }
+
+  for (var entry : pathMutations.entrySet()) {
+      var rr = http.sendRequest(baseReq.withPath(entry.getValue()));
+      if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+          findings.add(new Finding(
+              entry.getKey() + ": " + entry.getValue(),
+              "Path Mutation",
+              rr
+          ));
+      }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP D: HTTP method overrides
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Method-override headers instruct some frameworks to treat the request as a
+  // different HTTP method server-side. Auth middleware bound to specific methods
+  // may not evaluate the overridden method.
+
+  var methodOverrideHeaders = new String[]{
+      "X-HTTP-Method-Override",
+      "X-Method-Override",
+      "X-HTTP-Method",
+  };
+
+  for (var h : methodOverrideHeaders) {
+      // Echo the original method back — some apps trust this header unconditionally
+      var rr = http.sendRequest(baseReq.withHeader(h, method));
+      if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+          findings.add(new Finding(h + ": " + method, "HTTP Method Override", rr));
+      }
+  }
+
+  // HEAD method — some auth middleware skips checks for HEAD requests.
+  // A HEAD 200 proves the resource exists and is accessible (no body needed).
+  if (!method.equalsIgnoreCase("HEAD")) {
+      var headRr = http.sendRequest(baseReq.withMethod("HEAD"));
+      if (headRr.hasResponse() && headRr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+          findings.add(new Finding("HEAD method", "HTTP Method Bypass", headRr));
+      }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP E: Host / protocol spoofing
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Applications that enforce auth only on external traffic, or only on HTTP,
+  // can be bypassed by overriding the apparent incoming protocol or host.
+
+  var hostProtoHeaders = new String[][]{
+      {"X-Forwarded-Proto",  "https"},
+      {"X-Forwarded-Host",   "localhost"},
+      {"X-Host",             "localhost"},
+  };
+
+  for (var h : hostProtoHeaders) {
+      var rr = http.sendRequest(baseReq.withHeader(h[0], h[1]));
+      if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+          findings.add(new Finding(h[0] + ": " + h[1], "Host / Protocol Spoofing", rr));
+      }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // REPORT
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  var issues = new java.util.ArrayList<AuditIssue>();
+
+  for (var f : findings) {
+      var statusCode = f.rr().response().statusCode();
+
+      var detail = new StringBuilder();
+      detail.append("<p>The 401 Unauthorized response at <code>")
+            .append(api().utilities().htmlUtils().encode(baseReq.url()))
+            .append("</code> was bypassed using: <strong>")
+            .append(api().utilities().htmlUtils().encode(f.name()))
+            .append("</strong> (category: <em>")
+            .append(api().utilities().htmlUtils().encode(f.category()))
+            .append("</em>).</p>")
+            .append("<p>The probe returned HTTP <code>")
+            .append(statusCode)
+            .append("</code>. Verify the response body grants access to the protected ")
+            .append("resource rather than serving an alternate error page or redirect.</p>");
+
+      issues.add(AuditIssue.auditIssue(
+          "401 Bypass — " + f.category() + " [" + f.name() + "]",
+          detail.toString(),
+          "<p>Enforce authentication at the application layer after full URL normalisation, "
+              + "independent of HTTP method, path casing, or URL encoding variants. "
+              + "If the application sits behind a trusted reverse proxy, strip and re-inject "
+              + "all forwarding headers at the proxy boundary — never trust client-supplied "
+              + "values for <code>X-Forwarded-For</code>, <code>X-Original-URL</code>, or "
+              + "similar headers. Use an explicit allowlist for paths that skip auth rather "
+              + "than a denylist of protected patterns.</p>",
+          baseReq.url(),
+          AuditIssueSeverity.HIGH,
+          AuditIssueConfidence.FIRM,
+          "<p>HTTP 401 authentication bypasses occur when the auth middleware inspects a "
+              + "different representation of the request than the routing layer ultimately "
+              + "handles. Common root causes include: case-sensitive path pattern matching, "
+              + "URL-normalisation inconsistencies between auth and routing layers, blind "
+              + "trust of client-controlled forwarding headers without proxy-boundary "
+              + "enforcement, and method-specific auth checks that do not account for "
+              + "override headers or alternative HTTP methods such as HEAD.</p>",
+          "<p>Centralise authentication as middleware that runs after the framework has "
+              + "fully normalised the URL (decoded, collapsed dot-segments, resolved "
+              + "path parameters). Never apply auth rules to the raw unparsed path. "
+              + "Reject or strip all proxy/forwarding headers at the ingress unless the "
+              + "originating proxy is explicitly trusted by IP. Bind method-level auth "
+              + "checks to ALL methods, including HEAD, OPTIONS, and override-header "
+              + "variants.</p>",
+          AuditIssueSeverity.HIGH,
+          f.rr()
+      ));
+  }
+
+  return issues.isEmpty()
+      ? AuditResult.auditResult()
+      : AuditResult.auditResult(issues.toArray(new AuditIssue[0]));

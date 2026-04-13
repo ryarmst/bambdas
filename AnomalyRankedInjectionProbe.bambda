@@ -4,94 +4,57 @@ function: SCAN_CHECK_ACTIVE_PER_INSERTION_POINT
 location: SCANNER
 source: |
   /**
-   * Anomaly-Ranked Injection Probe — active, per insertion point.
-   * Sends a payload corpus, ranks all responses with RankingAlgorithm.ANOMALY,
-   * and raises MEDIUM / TENTATIVE only when both gates pass:
-   *   Gate 1 (absolute):  topRank >= RANK_THRESHOLD
-   *   Gate 2 (margin):    topRank >= MIN_MARGIN_OVER_MEDIAN * medianRank
-   * See AnomalyRankedInjectionProbe.md for tuning guidance.
+   * Sends a payload corpus per insertion point, ranks responses with ANOMALY,
+   * and raises MEDIUM/TENTATIVE when the top payload rank clears both gates:
+   *   Gate 1: topRank >= RANK_THRESHOLD
+   *   Gate 2: topRank >= MIN_MARGIN_OVER_MEDIAN * median
    **/
 
-  // === BURP GLOBALS =========================================================
-  // Required:
-  //   bambda-fuzzing                (boolean: "true"/"false") — master on/off for fuzzing checks
-  // Optional:
-  //   anomaly-probe-wordlist        (string) — absolute path to payload file; one entry per line,
-  //                                 lines starting with # ignored; falls back to built-in list
-  //   anomaly-probe-rank-threshold  (int, default "5")   — minimum raw anomaly rank (Gate 1);
-  //                                 calibrate empirically — see AnomalyRankedInjectionProbe.md
-  //   anomaly-probe-margin          (double, default "2.0") — top-rank / median multiplier (Gate 2);
-  //                                 raise toward 3.0 on WAF targets, lower toward 1.5 if missing findings
-  //   anomaly-probe-max-payloads    (int, default "25") — payload cap per insertion point
-  // Import globals.csv via Burp Globals → Options → Import variables.
+  // Burp Globals (bg.*):
+  //   bambda-fuzzing              (bool, required) — master on/off
+  //   anomaly-probe-wordlist      (string)  — path to payload file; # lines ignored; falls back to built-in
+  //   anomaly-probe-rank-threshold (int,    default 5)    — Gate 1 minimum rank
+  //   anomaly-probe-margin         (double, default 2.0)  — Gate 2 top/median multiplier
+  //   anomaly-probe-max-payloads   (int,    default 25)   — payload cap per insertion point
+  //   anomaly-probe-url-encode     (bool,   default false) — false: URL-decode payloads before insertion
+  //                                  (prevents double-encoding %-encoded wordlists like the built-in list);
+  //                                  true: pass raw, let the insertion point encode them
   if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-fuzzing"))) {
       return AuditResult.auditResult();
   }
-  final int    RANK_THRESHOLD                   = Integer.parseInt(
+  final int     RANK_THRESHOLD                   = Integer.parseInt(
       java.util.Objects.requireNonNullElse(System.getProperty("bg.anomaly-probe-rank-threshold"), "5"));
-  final double MIN_MARGIN_OVER_MEDIAN           = Double.parseDouble(
+  final double  MIN_MARGIN_OVER_MEDIAN           = Double.parseDouble(
       java.util.Objects.requireNonNullElse(System.getProperty("bg.anomaly-probe-margin"), "2.0"));
-  final int    MAX_PAYLOADS_PER_INSERTION_POINT = Integer.parseInt(
+  final int     MAX_PAYLOADS_PER_INSERTION_POINT = Integer.parseInt(
       java.util.Objects.requireNonNullElse(System.getProperty("bg.anomaly-probe-max-payloads"), "25"));
+  final boolean URL_ENCODE_PAYLOADS              = Boolean.parseBoolean(
+      java.util.Objects.requireNonNullElse(System.getProperty("bg.anomaly-probe-url-encode"), "false"));
 
   final String ISSUE_NAME = "Anomalous response to injection probes";
   final String ISSUE_BACKGROUND =
-      "<p>This check sends a corpus of diverse injection probes to a single " +
-      "insertion point and ranks every response — including the unmodified " +
-      "baseline — using Burp&rsquo;s built-in anomaly-detection algorithm " +
-      "(<code>RankingUtils.rank(..., RankingAlgorithm.ANOMALY)</code>). A " +
-      "finding is raised only when the top-ranked response stands out from " +
-      "the corpus median by a configurable margin, reducing noise caused by " +
-      "uniformly-unusual application behaviour (WAFs, CDNs, error-heavy APIs)." +
-      "</p><p>MEDIUM / TENTATIVE means one probe triggered a structurally " +
-      "distinct response. Manual review is required to determine exploitability. " +
-      "Common true-positive causes: SQL errors, command output leakage, template " +
-      "evaluation, path traversal disclosure, parser exceptions.</p>";
+      "<p>This check sends a corpus of injection probes to a single insertion point and ranks " +
+      "every response using Burp&rsquo;s anomaly-detection algorithm " +
+      "(<code>RankingUtils.rank(..., RankingAlgorithm.ANOMALY)</code>). A finding is raised " +
+      "only when the top-ranked response stands out from the corpus median by a configurable " +
+      "margin, reducing noise from uniformly-unusual behaviour (WAFs, CDNs, error-heavy APIs)." +
+      "</p><p>MEDIUM/TENTATIVE means one probe triggered a structurally distinct response. " +
+      "Manual review is required. Common true-positive causes: SQL errors, command output, " +
+      "template evaluation, path traversal, parser exceptions.</p>";
 
-  // === PAYLOAD CORPUS =======================================================
-  // Set bg.anomaly-probe-wordlist in Burp Globals to load a custom payload file.
-  // File format: one payload per line; lines starting with # and blank lines ignored.
-  // If the global is absent or the file cannot be read, FALLBACK_PAYLOADS is used.
-  // Payloads are passed verbatim to buildHttpRequestWithPayload(), which applies
-  // context-appropriate encoding automatically. Do NOT pre-encode entries in the file.
-
-  // Hardcoded fallback: URL-encoded forms of ASCII characters commonly significant
-  // in web security contexts. Tests how the application handles percent-encoded input —
-  // relevant for double-decode bugs, filter bypasses, and parser inconsistencies.
+  // Built-in payload list: %-encoded special characters for double-decode and filter-bypass testing.
   final var FALLBACK_PAYLOADS = java.util.List.of(
-      "%00",  // null byte
-      "%09",  // tab
-      "%0a",  // line feed
-      "%0d",  // carriage return
-      "%20",  // space
-      "%22",  // "
-      "%23",  // #
-      "%25",  // % (self-referential; triggers double-decode bugs)
-      "%26",  // &
-      "%27",  // '
-      "%2b",  // +
-      "%2f",  // /
-      "%3b",  // ;
-      "%3c",  // <
-      "%3d",  // =
-      "%3e",  // >
-      "%3f",  // ?
-      "%40",  // @
-      "%5c",  // \
-      "%60",  // `
-      "%7c",  // |
-      "%7e",  // ~
-      "%7f"   // DEL
+      "%00", "%09", "%0a", "%0d", "%20", "%22", "%23", "%25", "%26", "%27",
+      "%2b", "%2f", "%3b", "%3c", "%3d", "%3e", "%3f", "%40", "%5c", "%60",
+      "%7c", "%7e", "%7f"
   );
 
-  // Attempt to load from file; fall back to FALLBACK_PAYLOADS on any failure.
   var PAYLOADS = FALLBACK_PAYLOADS;
   var _wordlistPath = System.getProperty("bg.anomaly-probe-wordlist");
   if (_wordlistPath != null) {
       try {
           var _loaded = java.nio.file.Files.readAllLines(java.nio.file.Paths.get(_wordlistPath))
-              .stream()
-              .map(String::trim)
+              .stream().map(String::trim)
               .filter(l -> !l.isEmpty() && !l.startsWith("#"))
               .toList();
           PAYLOADS = _loaded;
@@ -101,57 +64,53 @@ source: |
       }
   }
 
-  // === GUARD ================================================================
-
   if (insertionPoint == null) return AuditResult.auditResult();
   if (!requestResponse.hasResponse()) return AuditResult.auditResult();
 
   final String ipName = insertionPoint.name();
   final String ipType = insertionPoint.type().toString();
 
-  // === BUILD CORPUS =========================================================
-  // Baseline is always index 0 so the ranker has a "normal" reference.
-  // IdentityHashMap (== equality) maps each HttpRequestResponse back to its
-  // payload label without being confused by equal-but-distinct response objects.
-
-  var corpus   = new java.util.ArrayList<HttpRequestResponse>();
-  var labelMap = new java.util.IdentityHashMap<HttpRequestResponse, String>();
-
+  // Corpus: baseline at index 0 (reference for the ranker), payloads at 1+.
+  // Labels parallel corpus by index. The baseline is excluded when selecting
+  // the top candidate — a baseline-wins result means no payload stood out.
+  var corpus = new java.util.ArrayList<HttpRequestResponse>();
+  var labels = new java.util.ArrayList<String>();
   corpus.add(requestResponse);
-  labelMap.put(requestResponse, "<baseline>");
+  labels.add("<baseline>");
 
   int sent = 0;
   for (var payload : PAYLOADS) {
       if (sent >= MAX_PAYLOADS_PER_INSERTION_POINT) break;
       try {
-          var req = insertionPoint.buildHttpRequestWithPayload(ByteArray.byteArray(payload));
-          var rr  = http.sendRequest(req);
+          // URL-decode by default so %-encoded payloads (e.g. %27) aren't
+          // double-encoded by the insertion point to %2527.
+          String effectivePayload;
+          if (URL_ENCODE_PAYLOADS) {
+              effectivePayload = payload;
+          } else {
+              try {
+                  effectivePayload = java.net.URLDecoder.decode(payload, java.nio.charset.StandardCharsets.UTF_8);
+              } catch (Exception _e) {
+                  effectivePayload = payload;
+              }
+          }
+          var rr = http.sendRequest(insertionPoint.buildHttpRequestWithPayload(ByteArray.byteArray(effectivePayload)));
           if (!rr.hasResponse()) continue;
           corpus.add(rr);
-          labelMap.put(rr, payload);
+          labels.add(payload); // store original (pre-decode) string as the display label
           sent++;
       } catch (Exception e) {
-          api().logging().logToOutput(
-              "[AnomalyProbe] send error [" + ipName + "] payload=[" + payload + "]: " + e.getMessage()
-          );
+          api().logging().logToOutput("[AnomalyProbe] send error [" + ipName + "] payload=[" + payload + "]: " + e.getMessage());
       }
   }
 
   if (corpus.size() < 3) return AuditResult.auditResult();
 
-  // === RANK =================================================================
-  // rank() returns an unsorted List<RankedHttpRequestResponse>.
-  // .rank() -> int: higher = more anomalous within this corpus.
-
-  java.util.List<burp.api.montoya.utilities.rank.RankedHttpRequestResponse> ranked = api().utilities().rankingUtils().rank(corpus, burp.api.montoya.utilities.rank.RankingAlgorithm.ANOMALY);
+  java.util.List<burp.api.montoya.utilities.rank.RankedHttpRequestResponse> ranked =
+      api().utilities().rankingUtils().rank(corpus, burp.api.montoya.utilities.rank.RankingAlgorithm.ANOMALY);
   if (ranked == null || ranked.isEmpty()) return AuditResult.auditResult();
 
-  // Descending sort — ranked.get(0) is the most anomalous entry.
-  ranked.sort((a, b) -> Integer.compare(b.rank(), a.rank()));
-
-  // === MEDIAN ===============================================================
-  // Build a separate ascending int[] for the median so it is independent of
-  // the descending sort order above.
+  ranked.sort((a, b) -> Integer.compare(b.rank(), a.rank())); // descending
 
   int n = ranked.size();
   int[] sortedRanks = ranked.stream().mapToInt(r -> r.rank()).sorted().toArray();
@@ -159,53 +118,63 @@ source: |
       ? sortedRanks[n / 2]
       : (sortedRanks[n / 2 - 1] + (double) sortedRanks[n / 2]) / 2.0;
 
-  var    top      = ranked.get(0);
-  int    topRank  = top.rank();
-  double margin   = (median > 0.0) ? topRank / median : Double.MAX_VALUE;
+  // Find the highest-ranked payload entry (skip baseline at index 0).
+  // requestResponse() may return a wrapper with a different reference, so we
+  // match by identity first then fall back to request-byte comparison.
+  burp.api.montoya.utilities.rank.RankedHttpRequestResponse top = null;
+  String topLabel = null;
 
-  String topLabel = labelMap.getOrDefault(top.requestResponse(), "<unknown>");
+  outer:
+  for (var r : ranked) {
+      HttpRequestResponse candidate = r.requestResponse();
+      for (int i = 1; i < corpus.size(); i++) {
+          if (corpus.get(i) == candidate) {
+              top = r; topLabel = labels.get(i); break outer;
+          }
+      }
+      byte[] candidateBytes = candidate.request().toByteArray().getBytes();
+      for (int i = 1; i < corpus.size(); i++) {
+          if (java.util.Arrays.equals(corpus.get(i).request().toByteArray().getBytes(), candidateBytes)) {
+              top = r; topLabel = labels.get(i); break outer;
+          }
+      }
+  }
 
-  // === GATE CHECK ===========================================================
+  if (top == null) return AuditResult.auditResult();
+
+  int    topRank = top.rank();
+  double margin  = (median > 0.0) ? topRank / median : Double.MAX_VALUE;
 
   boolean gateAbsolute = topRank >= RANK_THRESHOLD;
   boolean gateMargin   = margin  >= MIN_MARGIN_OVER_MEDIAN;
   boolean raised       = gateAbsolute && gateMargin;
 
   api().logging().logToOutput(String.format(
-      "[AnomalyProbe] %-30s %-22s payloads=%2d  topRank=%d  median=%.1f  margin=%5.2fx  gate1=%s gate2=%s  raised=%s",
+      "[AnomalyProbe] %-30s %-22s payloads=%2d  topRank=%d  median=%.1f  margin=%5.2fx  gate1=%s gate2=%s  raised=%s  urlEncode=%s",
       ipName, ipType, sent, topRank, median, margin,
-      gateAbsolute ? "PASS" : "fail",
-      gateMargin   ? "PASS" : "fail",
-      raised ? "YES" : "no"
+      gateAbsolute ? "PASS" : "fail", gateMargin ? "PASS" : "fail",
+      raised ? "YES" : "no", URL_ENCODE_PAYLOADS ? "on" : "off"
   ));
 
   if (!raised) return AuditResult.auditResult();
 
-  // === FINDING ==============================================================
-  // Issue title includes the parameter name so Burp's title+URL deduplication
-  // naturally produces one finding per insertion point.
-
-  var html   = api().utilities().htmlUtils();
+  var html = api().utilities().htmlUtils();
   var detail =
-      "<p>An anomalous response was detected at insertion point " +
-      "<code>" + html.encode(ipName) + "</code> " +
-      "(type: <code>" + html.encode(ipType) + "</code>).</p>" +
-      "<ul>" +
+      "<p>Anomalous response at insertion point <code>" + html.encode(ipName) + "</code> " +
+      "(type: <code>" + html.encode(ipType) + "</code>).</p><ul>" +
       "<li><b>Trigger payload:</b> <code>" + html.encode(topLabel) + "</code></li>" +
-      "<li><b>Anomaly rank:</b> " + topRank + " (gate: &ge;&nbsp;" + RANK_THRESHOLD + " &mdash; " + (gateAbsolute ? "PASS" : "FAIL") + ")</li>" +
+      "<li><b>Anomaly rank:</b> " + topRank + " (gate: &ge;&nbsp;" + RANK_THRESHOLD + " &mdash; PASS)</li>" +
       "<li><b>Corpus median rank:</b> " + String.format("%.1f", median) + "</li>" +
-      "<li><b>Margin over median:</b> " + String.format("%.2f", margin) + "x (gate: &ge;&nbsp;" + MIN_MARGIN_OVER_MEDIAN + "x &mdash; " + (gateMargin ? "PASS" : "FAIL") + ")</li>" +
-      "<li><b>Corpus size:</b> " + corpus.size() + " requests (incl. baseline)</li>" +
-      "</ul>" +
-      "<p>Baseline and anomalous request/response are attached. Diff them to identify what changed.</p>";
+      "<li><b>Margin over median:</b> " + String.format("%.2f", margin) + "x (gate: &ge;&nbsp;" + MIN_MARGIN_OVER_MEDIAN + "x &mdash; PASS)</li>" +
+      "<li><b>Corpus size:</b> " + corpus.size() + " (incl. baseline)</li>" +
+      "</ul><p>Baseline and anomalous requests are attached.</p>";
 
   return AuditResult.auditResult(
       AuditIssue.auditIssue(
           ISSUE_NAME + " [" + ipName + "]",
           detail,
-          "<p>Investigate manually. If the anomalous response indicates server-side " +
-          "evaluation, error disclosure, file leakage, or a timing difference, treat " +
-          "as a potential injection vulnerability and apply appropriate remediation.</p>",
+          "<p>Investigate manually. Anomalous responses indicating server-side evaluation, " +
+          "error disclosure, or file leakage should be treated as potential injection vulnerabilities.</p>",
           requestResponse.request().url(),
           AuditIssueSeverity.MEDIUM,
           AuditIssueConfidence.TENTATIVE,
