@@ -2,31 +2,20 @@ id: e5b1c3d7-9a2f-4e8c-b4d6-7f0e2a1c5b9e
 name: 401 Authentication Bypass — Comprehensive Probe Suite
 function: SCAN_CHECK_ACTIVE_PER_REQUEST
 location: SCANNER
+burpglobal:
+  bambda-active: false            # master on/off; set true to enable (bool)
 source: |
   /**
    * 401 Authentication Bypass — Comprehensive Probe Suite
-   *
-   * Only fires when the base request returns HTTP 401.
-   * Fires targeted probes across five bypass categories and reports any
-   * probe that receives a 2xx response, with the technique clearly labelled.
-   *
-   * Categories
-   * ──────────
-   *   A. Trusted-source IP spoofing  — loopback/internal-IP headers
-   *   B. Path override headers       — X-Original-URL, X-Rewrite-URL
-   *   C. Path mutations              — double-slash, trailing slash,
-   *                                    dot-segment, semicolon, uppercase,
-   *                                    .json extension
-   *   D. HTTP method overrides       — X-HTTP-Method-Override headers, HEAD
-   *   E. Host / protocol spoofing    — X-Forwarded-Host, X-Forwarded-Proto,
-   *                                    X-Host
-   *
-   * Detection: any probe returning a 2xx status against the 401 base is
-   * flagged HIGH / FIRM. Verify the response body is the protected resource
-   * and not an alternate error page.
-   *
+   * Probes IP spoofing, path override headers, path mutations, method overrides, and host/protocol
+   * spoofing against any base request returning 401; reports any 2xx bypass as HIGH/FIRM.
    * @author burp-bambdas skill
    **/
+
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-active"))) {
+      api().logging().logToOutput("[Auth401Bypass] disabled — set bg.bambda-active=true to enable");
+      return AuditResult.auditResult();
+  }
 
   // ── GATE: only run against 401 base responses ─────────────────────────────
   if (!requestResponse.hasResponse()) {

@@ -2,6 +2,13 @@ id: b3f8a1c2-74e9-4d5f-9e1a-2c7f0b843a6d
 name: Anomaly-Ranked Injection Probe
 function: SCAN_CHECK_ACTIVE_PER_INSERTION_POINT
 location: SCANNER
+burpglobal:
+  bambda-fuzzing: false                    # master on/off; set true to enable (bool)
+  anomaly-probe-wordlist: ""               # path to newline-delimited payload file; # lines ignored; falls back to built-in (string)
+  anomaly-probe-rank-threshold: 5          # Gate 1: minimum anomaly rank to raise a finding (int)
+  anomaly-probe-margin: 2.0                # Gate 2: top rank must be >= this multiple of the corpus median (double)
+  anomaly-probe-max-payloads: 25           # payload cap per insertion point (int)
+  anomaly-probe-url-encode: false          # false = URL-decode payloads before insertion (prevents double-encoding %-encoded wordlists); true = pass raw (bool)
 source: |
   /**
    * Sends a payload corpus per insertion point, ranks responses with ANOMALY,
@@ -10,16 +17,8 @@ source: |
    *   Gate 2: topRank >= MIN_MARGIN_OVER_MEDIAN * median
    **/
 
-  // Burp Globals (bg.*):
-  //   bambda-fuzzing              (bool, required) — master on/off
-  //   anomaly-probe-wordlist      (string)  — path to payload file; # lines ignored; falls back to built-in
-  //   anomaly-probe-rank-threshold (int,    default 5)    — Gate 1 minimum rank
-  //   anomaly-probe-margin         (double, default 2.0)  — Gate 2 top/median multiplier
-  //   anomaly-probe-max-payloads   (int,    default 25)   — payload cap per insertion point
-  //   anomaly-probe-url-encode     (bool,   default false) — false: URL-decode payloads before insertion
-  //                                  (prevents double-encoding %-encoded wordlists like the built-in list);
-  //                                  true: pass raw, let the insertion point encode them
   if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-fuzzing"))) {
+      api().logging().logToOutput("[AnomalyProbe] disabled — set bg.bambda-fuzzing=true to enable");
       return AuditResult.auditResult();
   }
   final int     RANK_THRESHOLD                   = Integer.parseInt(
@@ -65,7 +64,10 @@ source: |
   }
 
   if (insertionPoint == null) return AuditResult.auditResult();
-  if (!requestResponse.hasResponse()) return AuditResult.auditResult();
+  if (!requestResponse.hasResponse()) {
+      api().logging().logToOutput("[AnomalyProbe] skipping " + insertionPoint.name() + " — base requestResponse has no response");
+      return AuditResult.auditResult();
+  }
 
   final String ipName = insertionPoint.name();
   final String ipType = insertionPoint.type().toString();
@@ -89,8 +91,8 @@ source: |
               effectivePayload = payload;
           } else {
               try {
-                  effectivePayload = java.net.URLDecoder.decode(payload, java.nio.charset.StandardCharsets.UTF_8);
-              } catch (Exception _e) {
+                  effectivePayload = java.net.URLDecoder.decode(payload, "UTF-8");
+              } catch (Exception decodeErr) {
                   effectivePayload = payload;
               }
           }
@@ -124,18 +126,20 @@ source: |
   burp.api.montoya.utilities.rank.RankedHttpRequestResponse top = null;
   String topLabel = null;
 
-  outer:
-  for (var r : ranked) {
+  for (int ri = 0; ri < ranked.size() && top == null; ri++) {
+      var r = ranked.get(ri);
       HttpRequestResponse candidate = r.requestResponse();
-      for (int i = 1; i < corpus.size(); i++) {
+      for (int i = 1; i < corpus.size() && top == null; i++) {
           if (corpus.get(i) == candidate) {
-              top = r; topLabel = labels.get(i); break outer;
+              top = r; topLabel = labels.get(i);
           }
       }
-      byte[] candidateBytes = candidate.request().toByteArray().getBytes();
-      for (int i = 1; i < corpus.size(); i++) {
-          if (java.util.Arrays.equals(corpus.get(i).request().toByteArray().getBytes(), candidateBytes)) {
-              top = r; topLabel = labels.get(i); break outer;
+      if (top == null) {
+          byte[] candidateBytes = candidate.request().toByteArray().getBytes();
+          for (int i = 1; i < corpus.size() && top == null; i++) {
+              if (java.util.Arrays.equals(corpus.get(i).request().toByteArray().getBytes(), candidateBytes)) {
+                  top = r; topLabel = labels.get(i);
+              }
           }
       }
   }

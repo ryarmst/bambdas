@@ -2,42 +2,30 @@ id: c7d2f8a4-3e1b-4f9c-b6a2-5e8d0c4f7b1e
 name: Server-Side CSV Injection — OOB Interaction Detector
 function: SCAN_CHECK_ACTIVE_PER_INSERTION_POINT
 location: SCANNER
+burpglobal:
+  bambda-oob: false               # master on/off; set true to enable (bool)
+  ssci-oob-domain: ""             # custom OOB domain (e.g. c2.example.com); falls back to Collaborator if blank (string)
+  ssci-poll-sleep-ms: 1000        # ms between Collaborator poll attempts (int)
+  ssci-total-time-ms: 10000       # max total Collaborator poll time ms (int)
+  ssci-debug: false               # log payload detail to Burp output (bool)
 source: |
   /**
-   * Server-Side CSV Injection (SSCI) — Out-of-Band Interaction Detector
-   *
-   * Injects spreadsheet formula payloads into every parameter/body/cookie
-   * insertion point and confirms exploitation via out-of-band DNS or HTTP
-   * callbacks. Covers Google Sheets, LibreOffice Calc, and Excel DDE vectors.
-   *
-   * OOB MODES (resolved at runtime):
-   *
-   *   1. Custom domain (preferred)
-   *      Set the Java system property "csv.oob.domain" to a domain you control
-   *      and have a wildcard DNS/HTTP listener on, e.g.:
-   *        - Via Burp Globals extension:  key=csv.oob.domain  value=c2.example.com
-   *        - Via JVM arg:                 -Dcsv.oob.domain=c2.example.com
-   *      A unique 12-char token is prepended per payload: <token>.c2.example.com
-   *      Correlation tokens are logged to the Burp output console and embedded
-   *      in the issue detail. Findings are reported TENTATIVE — verify callbacks
-   *      on your listener and upgrade manually.
-   *
-   *   2. Burp Collaborator (automatic fallback)
-   *      When "csv.oob.domain" is not set, the script uses Burp Collaborator.
-   *      IMPORTANT: enable the "Use Collaborator" toggle in the Bambda script
-   *      settings panel so that `collaboratorClient` is in scope.
-   *      Interactions are polled automatically; confirmed findings are reported
-   *      as HIGH / CERTAIN (HTTP callback) or HIGH / FIRM (DNS-only callback).
-   *
-   * PAYLOADS (5 variants, one Collaborator domain per payload):
-   *   - Google Sheets / LibreOffice WEBSERVICE  — OOB HTTP
-   *   - Google Sheets IMPORTDATA                — OOB HTTP
-   *   - HYPERLINK formula (multi-engine)        — OOB HTTP (auto-fetch in some engines)
-   *   - Excel / LibreOffice DDE via nslookup    — OOB DNS
-   *   - Excel / LibreOffice DDE via curl        — OOB HTTP (Linux/macOS server)
-   *
+   * Server-Side CSV Injection (SSCI) — OOB Interaction Detector
+   * Injects spreadsheet formula payloads (WEBSERVICE, IMPORTDATA, HYPERLINK, DDE) and confirms
+   * exploitation via Burp Collaborator (auto) or a custom OOB domain (bg.ssci-oob-domain).
    * @author burp-bambdas skill
    **/
+
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-oob"))) {
+      api().logging().logToOutput("[SSCI] disabled — set bg.bambda-oob=true to enable");
+      return AuditResult.auditResult();
+  }
+  final long    POLL_SLEEP_MS = Long.parseLong(
+      java.util.Objects.requireNonNullElse(System.getProperty("bg.ssci-poll-sleep-ms"), "1000"));
+  final long    TOTAL_TIME_MS = Long.parseLong(
+      java.util.Objects.requireNonNullElse(System.getProperty("bg.ssci-total-time-ms"), "10000"));
+  final boolean DEBUG = Boolean.parseBoolean(
+      java.util.Objects.requireNonNullElse(System.getProperty("bg.ssci-debug"), "false"));
 
   // ═══════════════════════════════════════════════════════════════════════════
   // GUARD: skip null insertion points
@@ -55,13 +43,6 @@ source: |
           || ipType == AuditInsertionPointType.URL_PATH_FOLDER) {
       return AuditResult.auditResult();
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // CONFIG
-  // ═══════════════════════════════════════════════════════════════════════════
-  final long    POLL_SLEEP_MS = 1_000;   // ms between Collaborator poll attempts
-  final long    TOTAL_TIME_MS = 10_000;  // max total poll time — keep short: runs per insertion point!
-  final boolean DEBUG         = false;   // set true to log payload detail to Burp output
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PAYLOAD CATALOGUE
@@ -109,7 +90,7 @@ source: |
   // ═══════════════════════════════════════════════════════════════════════════
   // OOB MODE RESOLUTION
   // ═══════════════════════════════════════════════════════════════════════════
-  var customBaseDomain = System.getProperty("csv.oob.domain");
+  var customBaseDomain = System.getProperty("bg.ssci-oob-domain");
   var useCustomDomain  = (customBaseDomain != null && !customBaseDomain.isBlank());
 
   if (useCustomDomain) {
