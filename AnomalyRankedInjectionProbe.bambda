@@ -18,7 +18,6 @@ source: |
    **/
 
   if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-fuzzing"))) {
-      api().logging().logToOutput("[AnomalyProbe] disabled — set bg.bambda-fuzzing=true to enable");
       return AuditResult.auditResult();
   }
   final int     RANK_THRESHOLD                   = Integer.parseInt(
@@ -57,17 +56,13 @@ source: |
               .filter(l -> !l.isEmpty() && !l.startsWith("#"))
               .toList();
           PAYLOADS = _loaded;
-          api().logging().logToOutput("[AnomalyProbe] loaded " + PAYLOADS.size() + " payloads from: " + _wordlistPath);
       } catch (Exception e) {
-          api().logging().logToOutput("[AnomalyProbe] wordlist load failed (" + e.getMessage() + "), using fallback");
+          // wordlist load failed; fall through to FALLBACK_PAYLOADS
       }
   }
 
   if (insertionPoint == null) return AuditResult.auditResult();
-  if (!requestResponse.hasResponse()) {
-      api().logging().logToOutput("[AnomalyProbe] skipping " + insertionPoint.name() + " — base requestResponse has no response");
-      return AuditResult.auditResult();
-  }
+  if (!requestResponse.hasResponse()) return AuditResult.auditResult();
 
   final String ipName = insertionPoint.name();
   final String ipType = insertionPoint.type().toString();
@@ -102,7 +97,7 @@ source: |
           labels.add(payload); // store original (pre-decode) string as the display label
           sent++;
       } catch (Exception e) {
-          api().logging().logToOutput("[AnomalyProbe] send error [" + ipName + "] payload=[" + payload + "]: " + e.getMessage());
+          // skip payload on send error
       }
   }
 
@@ -152,13 +147,6 @@ source: |
   boolean gateAbsolute = topRank >= RANK_THRESHOLD;
   boolean gateMargin   = margin  >= MIN_MARGIN_OVER_MEDIAN;
   boolean raised       = gateAbsolute && gateMargin;
-
-  api().logging().logToOutput(String.format(
-      "[AnomalyProbe] %-30s %-22s payloads=%2d  topRank=%d  median=%.1f  margin=%5.2fx  gate1=%s gate2=%s  raised=%s  urlEncode=%s",
-      ipName, ipType, sent, topRank, median, margin,
-      gateAbsolute ? "PASS" : "fail", gateMargin ? "PASS" : "fail",
-      raised ? "YES" : "no", URL_ENCODE_PAYLOADS ? "on" : "off"
-  ));
 
   if (!raised) return AuditResult.auditResult();
 

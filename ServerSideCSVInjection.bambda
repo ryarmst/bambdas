@@ -7,7 +7,6 @@ burpglobal:
   ssci-oob-domain: ""             # custom OOB domain (e.g. c2.example.com); falls back to Collaborator if blank (string)
   ssci-poll-sleep-ms: 1000        # ms between Collaborator poll attempts (int)
   ssci-total-time-ms: 10000       # max total Collaborator poll time ms (int)
-  ssci-debug: false               # log payload detail to Burp output (bool)
 source: |
   /**
    * Server-Side CSV Injection (SSCI) — OOB Interaction Detector
@@ -17,15 +16,12 @@ source: |
    **/
 
   if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-oob"))) {
-      api().logging().logToOutput("[SSCI] disabled — set bg.bambda-oob=true to enable");
       return AuditResult.auditResult();
   }
-  final long    POLL_SLEEP_MS = Long.parseLong(
+  final long POLL_SLEEP_MS = Long.parseLong(
       java.util.Objects.requireNonNullElse(System.getProperty("bg.ssci-poll-sleep-ms"), "1000"));
-  final long    TOTAL_TIME_MS = Long.parseLong(
+  final long TOTAL_TIME_MS = Long.parseLong(
       java.util.Objects.requireNonNullElse(System.getProperty("bg.ssci-total-time-ms"), "10000"));
-  final boolean DEBUG = Boolean.parseBoolean(
-      java.util.Objects.requireNonNullElse(System.getProperty("bg.ssci-debug"), "false"));
 
   // ═══════════════════════════════════════════════════════════════════════════
   // GUARD: skip null insertion points
@@ -117,30 +113,7 @@ source: |
           );
           tokens.add(token);
           sentRR.put(token, rr);
-
-          if (DEBUG) {
-              api().logging().logToOutput(
-                  "[SSCI:custom] engine=" + spec.engine()
-                      + "  token=" + token
-                      + "  param=" + insertionPoint.name()
-                      + "  url=" + rr.request().url()
-              );
-          }
       }
-
-      // Log correlation table to Burp output so the tester can match
-      // incoming callbacks to the exact parameter and payload engine.
-      var logSb = new StringBuilder();
-      logSb.append("[SSCI] Fired ").append(specs.size())
-           .append(" payloads  param=").append(insertionPoint.name())
-           .append("  target=").append(requestResponse.request().url()).append("\n");
-      for (int i = 0; i < specs.size(); i++) {
-          logSb.append("  [").append(i + 1).append("] ")
-               .append(specs.get(i).engine())
-               .append("  →  watch: ").append(tokens.get(i)).append(".").append(base)
-               .append("\n");
-      }
-      api().logging().logToOutput(logSb.toString());
 
       // Build issue detail with correlation token list.
       var detail = new StringBuilder();
@@ -218,14 +191,6 @@ source: |
           );
           // Key on id (unique label part), not the full domain.
           sent.put(collabPayload.id().toString(), new SentEntry(rr, spec));
-
-          if (DEBUG) {
-              api().logging().logToOutput(
-                  "[SSCI:collab] engine=" + spec.engine()
-                      + "  id=" + collabPayload.id().toString()
-                      + "  param=" + insertionPoint.name()
-              );
-          }
       }
 
       // Bounded poll loop — interactions may arrive slightly after the HTTP
