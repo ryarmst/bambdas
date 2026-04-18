@@ -17,15 +17,7 @@ Custom Burp Suite Bambda scripts (scan checks, filters, actions). All `.bambda` 
 
 ## Burp Globals
 
-All globals used across this repo. Import [`globals.csv`](globals.csv) to add them all at once.
-
-| Global | Default | Type | Used by |
-|---|---|---|---|
-| `bambda-fuzzing` | `false` | boolean | Gate: enables all fuzzing/wordlist scan checks |
-| `anomaly-probe-wordlist` | _(empty)_ | string | Path to custom payload file; falls back to built-in URL-encoded ASCII list |
-| `anomaly-probe-rank-threshold` | `5` | int | Minimum raw anomaly rank to raise a finding (Gate 1) |
-| `anomaly-probe-margin` | `2.0` | double | Required top-rank / median multiplier (Gate 2) |
-| `anomaly-probe-max-payloads` | `25` | int | Payload cap per insertion point |
+Import [`globals.csv`](globals.csv) to provision all required globals at once. See the CSV for the current list of globals, defaults, and types.
 
 ---
 
