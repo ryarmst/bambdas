@@ -7,10 +7,10 @@ summary: Applies naming heuristics to unscoped packages found in webpack Module 
 
 ## Globals
 
-| Global | Default | Purpose |
-|---|---|---|
-| `bambda-js-dependency-scanning` | `false` | Master on/off switch |
-| `js-dep-max-matches` | `200` | Cap on share-scope regex matches processed per response |
+| Global | Default | Type | Purpose |
+|---|---|---|---|
+| `bambda-js-dependency-scanning` | `false` | `gate` | Master on/off switch |
+| `js-dep-max-matches` | `200` | `depth` | Cap on share-scope regex matches processed per response |
 
 ## Notes
 

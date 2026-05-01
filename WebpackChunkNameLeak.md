@@ -7,9 +7,9 @@ summary: Detects webpack bundle responses where the webpackChunk<appname> global
 
 ## Globals
 
-| Global | Default | Purpose |
-|---|---|---|
-| `bambda-js-dependency-scanning` | `false` | Master on/off switch |
+| Global | Default | Type | Purpose |
+|---|---|---|---|
+| `bambda-js-dependency-scanning` | `false` | `gate` | Master on/off switch |
 
 ## Notes
 

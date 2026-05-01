@@ -7,10 +7,10 @@ summary: Probes eight bypass categories against any 403 base response — IP spo
 
 ## Globals
 
-| Global | Default | Purpose |
-|---|---|---|
-| `bambda-active` | `false` | Master gate |
-| `bypass-403-ip-value` | `127.0.0.1` | Primary loopback value injected into all IP-spoofing headers (Group A) |
+| Global | Default | Type | Purpose |
+|---|---|---|---|
+| `bambda-active` | `false` | `gate` | Master gate |
+| `bypass-403-ip-value` | `127.0.0.1` | `sensitivity` | Primary loopback value injected into all IP-spoofing headers (Group A) |
 
 ## Notes
 

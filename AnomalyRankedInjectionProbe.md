@@ -7,14 +7,14 @@ summary: Sends a payload corpus per insertion point, ranks all responses with Bu
 
 ## Globals
 
-| Global | Default | Purpose |
-|---|---|---|
-| `bambda-fuzzing` | `false` | Master gate |
-| `anomaly-probe-wordlist` | _(empty)_ | Path to newline-delimited payload file; falls back to built-in %-encoded ASCII specials |
-| `anomaly-probe-rank-threshold` | `5` | Gate 1: minimum anomaly rank to raise a finding |
-| `anomaly-probe-margin` | `2.0` | Gate 2: top rank must be ≥ this multiple of the corpus median |
-| `anomaly-probe-max-payloads` | `25` | Payload cap per insertion point |
-| `anomaly-probe-url-encode` | `false` | Set `true` to pass payloads raw (skip URL-decode step) |
+| Global | Default | Type | Purpose |
+|---|---|---|---|
+| `bambda-fuzzing` | `false` | `gate` | Master gate |
+| `anomaly-probe-wordlist` | _(empty)_ | `resource` | Path to newline-delimited payload file; falls back to built-in %-encoded ASCII specials |
+| `anomaly-probe-rank-threshold` | `5` | `sensitivity` | Gate 1: minimum anomaly rank to raise a finding |
+| `anomaly-probe-margin` | `2.0` | `sensitivity` | Gate 2: top rank must be ≥ this multiple of the corpus median |
+| `anomaly-probe-max-payloads` | `25` | `depth` | Payload cap per insertion point |
+| `anomaly-probe-url-encode` | `false` | `encoding` | Set `true` to pass payloads raw (skip URL-decode step) |
 
 ## Notes
 

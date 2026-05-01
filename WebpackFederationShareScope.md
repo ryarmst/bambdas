@@ -7,11 +7,11 @@ summary: Detects webpack 5 Module Federation share-scope manifests and reports e
 
 ## Globals
 
-| Global | Default | Purpose |
-|---|---|---|
-| `bambda-js-dependency-scanning` | `false` | Master on/off switch |
-| `js-dep-cluster-threshold` | `3` | Minimum distinct package matches required to fire (prevents false positives from coincidental semver-shaped strings in unrelated minified code) |
-| `js-dep-max-matches` | `200` | Cap on share-scope regex matches processed per response |
+| Global | Default | Type | Purpose |
+|---|---|---|---|
+| `bambda-js-dependency-scanning` | `false` | `gate` | Master on/off switch |
+| `js-dep-cluster-threshold` | `3` | `sensitivity` | Minimum distinct package matches required to fire (prevents false positives from coincidental semver-shaped strings in unrelated minified code) |
+| `js-dep-max-matches` | `200` | `depth` | Cap on share-scope regex matches processed per response |
 
 ## Notes
 
