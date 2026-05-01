@@ -1,3 +1,6 @@
+bambda-js-dependency-scanning,false,
+js-dep-cluster-threshold,3,
+js-dep-max-matches,200,
 bambda-fuzzing,false,
 anomaly-probe-wordlist,,
 anomaly-probe-rank-threshold,5,

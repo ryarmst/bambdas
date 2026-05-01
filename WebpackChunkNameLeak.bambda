@@ -1,0 +1,62 @@
+id: f1a7c4e9-2b8d-4f3a-8e0c-5b2d96f3a1e7
+name: Webpack Internal Chunk Name Disclosed
+function: SCAN_CHECK_PASSIVE_PER_REQUEST
+location: SCANNER
+burpglobal:
+  bambda-js-dependency-scanning: false   # master on/off; set true to enable (bool)
+source: |
+  /**
+   * Detects webpack bundle responses that leak an internal application or team
+   * name via the webpackChunk<appname> global variable.
+   **/
+
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-js-dependency-scanning"))) {
+      return AuditResult.auditResult();
+  }
+
+  if (!requestResponse.hasResponse()) return AuditResult.auditResult();
+  var response = requestResponse.response();
+
+  var ct = response.headerValue("Content-Type");
+  if (ct == null || (!ct.contains("javascript") && !ct.contains("application/x-javascript"))) {
+      return AuditResult.auditResult();
+  }
+  var body = response.bodyToString();
+  if (body == null || !body.contains("webpackChunk")) return AuditResult.auditResult();
+
+  final var PAT = java.util.regex.Pattern.compile("webpackChunk([A-Za-z_][\\w]*)");
+  var names = new java.util.LinkedHashSet<String>();
+  var m = PAT.matcher(body);
+  while (m.find()) {
+      var name = m.group(1);
+      // Short names (≤ 4 chars) and the webpack 4 legacy constant are too generic to flag.
+      if (name.length() > 4 && !name.equals("webpackJsonp")) names.add(name);
+  }
+  if (names.isEmpty()) return AuditResult.auditResult();
+
+  var htmlUtil = api().utilities().htmlUtils();
+  var detail   = new StringBuilder(
+      "<p>This JavaScript response contains a <code>webpackChunk&lt;name&gt;</code> global " +
+      "that leaks an internal application or team identifier:</p><ul>");
+  for (var name : names) {
+      detail.append("<li><code>").append(htmlUtil.encode(name)).append("</code></li>");
+  }
+  detail.append("</ul>");
+
+  return AuditResult.auditResult(
+      AuditIssue.auditIssue(
+          "Webpack internal chunk name disclosed",
+          detail.toString(),
+          "Set a generic or content-addressed value for <code>output.uniqueName</code> in the " +
+          "webpack configuration to avoid publishing internal project names in public bundles.",
+          requestResponse.request().url(),
+          AuditIssueSeverity.INFORMATION,
+          AuditIssueConfidence.FIRM,
+          "Webpack 5 sets <code>self.webpackChunk&lt;uniqueName&gt;</code> in every bundle. " +
+          "The value defaults to the npm package name or the project directory name from the " +
+          "webpack config, often exposing internal team or project identifiers to any observer.",
+          "",
+          AuditIssueSeverity.INFORMATION,
+          requestResponse
+      )
+  );

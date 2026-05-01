@@ -1,0 +1,145 @@
+id: b4e9f2a1-3c7d-4f8e-9a0b-1d5c6e2f8b34
+name: Webpack Module Federation Share-Scope Manifest Exposed
+function: SCAN_CHECK_PASSIVE_PER_REQUEST
+location: SCANNER
+burpglobal:
+  bambda-js-dependency-scanning: false   # master on/off; set true to enable (bool)
+  js-dep-cluster-threshold: 3            # minimum distinct packages required to fire (int)
+  js-dep-max-matches: 200                # cap on share-scope regex matches per response (int)
+source: |
+  /**
+   * Detects Webpack 5 Module Federation share-scope manifests that expose registered
+   * package names and pinned versions. Flags any @scope absent from the known-public
+   * npm scope allowlist as a dependency-confusion candidate.
+   **/
+
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-js-dependency-scanning"))) {
+      return AuditResult.auditResult();
+  }
+
+  final int CLUSTER_THRESHOLD = Integer.parseInt(
+      java.util.Objects.requireNonNullElse(System.getProperty("bg.js-dep-cluster-threshold"), "3"));
+  final int MAX_MATCHES = Integer.parseInt(
+      java.util.Objects.requireNonNullElse(System.getProperty("bg.js-dep-max-matches"), "200"));
+
+  if (!requestResponse.hasResponse()) return AuditResult.auditResult();
+  var response = requestResponse.response();
+
+  // Cheapest checks first — skip non-JS and non-webpack responses before any regex work.
+  var ct = response.headerValue("Content-Type");
+  if (ct == null || (!ct.contains("javascript") && !ct.contains("application/x-javascript"))) {
+      return AuditResult.auditResult();
+  }
+  var body = response.bodyToString();
+  if (body == null) return AuditResult.auditResult();
+  if (!body.contains("webpackChunk") && !body.contains("__webpack_require__")) {
+      return AuditResult.auditResult();
+  }
+
+  // Share-scope registration pattern: minified helper (1–2 char identifier) followed by
+  // (pkgName, semver, ...). Group 1 = package name, group 2 = semver.
+  final var SHARE_SCOPE_PAT = java.util.regex.Pattern.compile(
+      "\\b[a-zA-Z_$][\\w$]?\\(\"(@?[\\w./\\-]+)\",\"(\\d+\\.\\d+\\.\\d+(?:[-+][\\w.]+)?)\"");
+
+  // Known-public npm @scopes — packages under these are not flagged as confusion candidates.
+  final var PUBLIC_SCOPES = java.util.Set.of(
+      "@azure", "@reduxjs", "@babel", "@emotion", "@mui", "@types", "@floating-ui",
+      "@tanstack", "@remix-run", "@stripe", "@sentry", "@aws-sdk", "@auth0", "@apollo",
+      "@microsoft", "@google-cloud", "@fortawesome", "@dnd-kit", "@react-aria",
+      "@chakra-ui", "@hookform", "@nestjs", "@angular", "@nrwl", "@nx", "@vitejs",
+      "@radix-ui", "@react-three", "@reach", "@nuxt", "@ionic", "@trpc", "@prisma",
+      "@supabase", "@firebase", "@octokit", "@sveltejs", "@solidjs", "@formkit",
+      "@vee-validate", "@zag-js", "@parcel", "@swc", "@rollup", "@esbuild",
+      "@webpack-cli", "@yarnpkg", "@pnpm", "@npm", "@expo", "@react-native",
+      "@react-navigation", "@redux-saga", "@xstate", "@uppy", "@ckeditor", "@tiptap",
+      "@lexical", "@tldraw", "@playwright", "@cypress", "@testing-library",
+      "@storybook", "@open-telemetry", "@opentelemetry", "@datadog", "@newrelic",
+      "@launchdarkly", "@statsig", "@growthbook", "@vercel", "@netlify", "@cloudflare",
+      "@discord", "@twilio", "@sendgrid", "@mailchimp", "@segment", "@amplitude",
+      "@mixpanel", "@posthog", "@hubspot", "@shopify", "@woocommerce", "@magento"
+  );
+
+  // Extract packages; putIfAbsent deduplicates eager-shared duplicates, first version wins.
+  var packages = new java.util.LinkedHashMap<String, String>(); // name → version
+  var m = SHARE_SCOPE_PAT.matcher(body);
+  int n = 0;
+  while (m.find() && n++ < MAX_MATCHES) {
+      packages.putIfAbsent(m.group(1), m.group(2));
+  }
+
+  // Require a cluster of matches — single coincidental matches occur in unrelated minified code.
+  if (packages.size() < CLUSTER_THRESHOLD) return AuditResult.auditResult();
+
+  // Collect scopes absent from the public allowlist.
+  var suspectScopes = new java.util.LinkedHashSet<String>();
+  for (var pkg : packages.keySet()) {
+      if (!pkg.startsWith("@")) continue;
+      int slash = pkg.indexOf('/');
+      var scope = slash >= 0 ? pkg.substring(0, slash) : pkg;
+      if (!PUBLIC_SCOPES.contains(scope)) suspectScopes.add(scope);
+  }
+
+  var severity  = suspectScopes.isEmpty() ? AuditIssueSeverity.LOW : AuditIssueSeverity.MEDIUM;
+  var htmlUtil  = api().utilities().htmlUtils();
+  var detail    = new StringBuilder();
+
+  detail.append("<p>A Webpack 5 Module Federation share-scope manifest was detected, exposing <b>")
+        .append(packages.size()).append("</b> registered package")
+        .append(packages.size() == 1 ? "" : "s").append(".</p><ul>");
+  int i = 0;
+  for (var e : packages.entrySet()) {
+      if (i++ >= 100) break;
+      detail.append("<li><code>").append(htmlUtil.encode(e.getKey()))
+            .append("</code> @ <code>").append(htmlUtil.encode(e.getValue())).append("</code></li>");
+  }
+  detail.append("</ul>");
+  if (packages.size() > 100) detail.append("<p>(List truncated at 100 entries.)</p>");
+
+  if (!suspectScopes.isEmpty()) {
+      detail.append("<h3>Dependency confusion candidates</h3>")
+            .append("<p>These scopes are absent from the known-public npm scope allowlist. ")
+            .append("If unregistered publicly, they are candidates for a Birsan-2021 ")
+            .append("dependency confusion attack:</p><ul>");
+      for (var scope : suspectScopes) {
+          detail.append("<li><code>").append(htmlUtil.encode(scope)).append("</code></li>");
+      }
+      detail.append("</ul>");
+  }
+
+  final var REMEDIATION =
+      "<p><b>Scope reservation:</b> Register private npm scopes as placeholder packages on the " +
+      "public registry to block name squatting.</p>" +
+      "<p><b>.npmrc pinning:</b> Add <code>@your-scope:registry=https://internal.registry/</code> " +
+      "to every project and CI <code>.npmrc</code> so npm always resolves private scopes from " +
+      "your own registry rather than falling back to the public one.</p>" +
+      "<p><b>Lockfile integrity:</b> Enforce <code>npm ci</code> or " +
+      "<code>yarn install --frozen-lockfile</code> in CI to prevent silent resolution to a " +
+      "higher-versioned public package.</p>" +
+      "<p><b>Manifest accessibility:</b> Evaluate whether <code>remoteEntry.js</code> files " +
+      "need to be publicly cacheable, or whether they can be gated behind authentication.</p>";
+
+  final var BACKGROUND =
+      "<p><b>Webpack Module Federation</b> (Webpack 5) enables micro-frontends to share runtime " +
+      "dependencies. The host loads a <code>remoteEntry.js</code> manifest that registers shared " +
+      "packages by exact name and semver in a global scope object, making the full dependency " +
+      "graph visible to any observer who can fetch the file.</p>" +
+      "<p><b>Dependency confusion</b> (Birsan, 2021): npm resolves packages from the public " +
+      "registry before a private registry when both contain a matching name. An attacker who " +
+      "publishes a higher-versioned package under a private scope name achieves automatic code " +
+      "execution inside the target's build or runtime environment — and this manifest provides " +
+      "the package names required to mount the attack.</p>";
+
+  return AuditResult.auditResult(
+      AuditIssue.auditIssue(
+          "Webpack Module Federation share-scope manifest exposed",
+          detail.toString(),
+          REMEDIATION,
+          requestResponse.request().url(),
+          severity,
+          AuditIssueConfidence.FIRM,
+          BACKGROUND,
+          "",
+          severity,
+          requestResponse
+      )
+  );

@@ -1,0 +1,121 @@
+id: d2b8f4a3-6c1e-4d9f-a7b0-3e5c8f2d1a96
+name: Webpack Bundle Likely-Internal Package Names
+function: SCAN_CHECK_PASSIVE_PER_REQUEST
+location: SCANNER
+burpglobal:
+  bambda-js-dependency-scanning: false   # master on/off; set true to enable (bool)
+  js-dep-max-matches: 200                # cap on share-scope regex matches per response (int)
+source: |
+  /**
+   * Applies naming heuristics to unscoped packages found in webpack Module Federation
+   * share-scope manifests to identify likely-internal or proprietary packages.
+   * Reports at TENTATIVE/MEDIUM due to elevated false-positive rate.
+   **/
+
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-js-dependency-scanning"))) {
+      return AuditResult.auditResult();
+  }
+
+  final int MAX_MATCHES = Integer.parseInt(
+      java.util.Objects.requireNonNullElse(System.getProperty("bg.js-dep-max-matches"), "200"));
+
+  if (!requestResponse.hasResponse()) return AuditResult.auditResult();
+  var response = requestResponse.response();
+
+  var ct = response.headerValue("Content-Type");
+  if (ct == null || (!ct.contains("javascript") && !ct.contains("application/x-javascript"))) {
+      return AuditResult.auditResult();
+  }
+  var body = response.bodyToString();
+  if (body == null) return AuditResult.auditResult();
+  if (!body.contains("webpackChunk") && !body.contains("__webpack_require__")) {
+      return AuditResult.auditResult();
+  }
+
+  // Compile all patterns once.
+  final var SHARE_SCOPE_PAT = java.util.regex.Pattern.compile(
+      "\\b[a-zA-Z_$][\\w$]?\\(\"(@?[\\w./\\-]+)\",\"(\\d+\\.\\d+\\.\\d+(?:[-+][\\w.]+)?)\"");
+
+  // H1: explicit internal-naming keywords in the package name.
+  final var H1_PAT = java.util.regex.Pattern.compile(
+      "(?i)(^internal-|^private-|^corp-|^company-|-internal$|-private$|-corp$|-internal-tools$|-platform$)");
+  // H2: 2–5 char acronym-style prefix (e.g. "xco-auth", "acme-platform").
+  final var H2_PAT = java.util.regex.Pattern.compile("^[a-z]{2,5}-[a-z][\\w-]+$");
+  // H3a: 3+ consecutive uppercase letters — internal acronym embedded in a package name.
+  final var H3A_PAT = java.util.regex.Pattern.compile("[A-Z]{3,}");
+  // H3b: internal-platform substrings that rarely appear in public packages.
+  final var H3B_PAT = java.util.regex.Pattern.compile(
+      "(?i)(feature-flags|auth-client|api-client|sdk-internal|shared-ui|design-system|core-utils|common-lib)");
+
+  // Known-public short prefixes — packages starting with these are skipped by H2 and H3b.
+  final var PUBLIC_PREFIXES = java.util.Set.of(
+      "react-", "redux-", "eslint-", "babel-", "postcss-", "vue-", "next-", "nuxt-",
+      "svelte-", "angular-", "node-", "npm-", "is-", "to-", "lodash-", "moment-",
+      "jquery-", "gulp-", "grunt-"
+  );
+
+  // Extract all package names from share-scope registrations.
+  var packages = new java.util.LinkedHashSet<String>();
+  var m = SHARE_SCOPE_PAT.matcher(body);
+  int n = 0;
+  while (m.find() && n++ < MAX_MATCHES) packages.add(m.group(1));
+
+  // Apply heuristics to unscoped packages only; scoped packages are handled by
+  // the separate WebpackFederationShareScope check.
+  var flagged = new java.util.LinkedHashSet<String>();
+  for (var pkg : packages) {
+      if (pkg.startsWith("@")) continue;
+
+      // H1 — highest signal, lowest FP
+      if (H1_PAT.matcher(pkg).find()) { flagged.add(pkg); continue; }
+
+      // H2 — broad; public prefix denylist suppresses most common false positives
+      if (H2_PAT.matcher(pkg).matches()) {
+          boolean pub = false;
+          for (var pfx : PUBLIC_PREFIXES) { if (pkg.startsWith(pfx)) { pub = true; break; } }
+          if (!pub) { flagged.add(pkg); continue; }
+      }
+
+      // H3a — unusual in public npm packages, which are conventionally all-lowercase
+      if (H3A_PAT.matcher(pkg).find()) { flagged.add(pkg); continue; }
+
+      // H3b — internal substrings combined with a non-public-looking prefix
+      if (H3B_PAT.matcher(pkg).find()) {
+          boolean pub = false;
+          for (var pfx : PUBLIC_PREFIXES) { if (pkg.startsWith(pfx)) { pub = true; break; } }
+          if (!pub) flagged.add(pkg);
+      }
+  }
+
+  if (flagged.isEmpty()) return AuditResult.auditResult();
+
+  var htmlUtil = api().utilities().htmlUtils();
+  var detail   = new StringBuilder(
+      "<p>The following unscoped package names in this webpack bundle matched heuristics for " +
+      "internal or proprietary tooling (naming-convention keywords, acronym-style short prefixes, " +
+      "embedded uppercase acronyms, or internal-platform substrings):</p><ul>");
+  for (var pkg : flagged) {
+      detail.append("<li><code>").append(htmlUtil.encode(pkg)).append("</code></li>");
+  }
+  detail.append("</ul>")
+        .append("<p>Manual verification is required — false-positive rate for this check is elevated.</p>");
+
+  return AuditResult.auditResult(
+      AuditIssue.auditIssue(
+          "Webpack bundle: likely-internal package names exposed",
+          detail.toString(),
+          "Verify whether the flagged packages exist on the public npm registry. If not, " +
+          "register placeholder packages to prevent dependency confusion attacks. " +
+          "Unlike scoped packages, unscoped names must be reserved individually.",
+          requestResponse.request().url(),
+          AuditIssueSeverity.MEDIUM,
+          AuditIssueConfidence.TENTATIVE,
+          "Unscoped npm package names that are not registered publicly are candidates for " +
+          "Birsan-2021 dependency confusion attacks. Unlike scoped packages, unscoped names " +
+          "cannot be reserved by namespace — each name must be individually registered on " +
+          "the public registry to block a squatting attack.",
+          "",
+          AuditIssueSeverity.MEDIUM,
+          requestResponse
+      )
+  );
