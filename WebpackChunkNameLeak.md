@@ -1,7 +1,7 @@
 ---
 name: Webpack Internal Chunk Name Disclosed
 type: SCAN_CHECK_PASSIVE_PER_REQUEST
-gate: bambda-js-dependency-scanning
+gate: gate-js-dependency-scanning
 summary: Detects webpack bundle responses where the webpackChunk<appname> global leaks an internal application or team identifier; fires at INFORMATION/FIRM on any JavaScript response containing a non-generic chunk name.
 ---
 
@@ -9,7 +9,7 @@ summary: Detects webpack bundle responses where the webpackChunk<appname> global
 
 | Global | Default | Type | Purpose |
 |---|---|---|---|
-| `bambda-js-dependency-scanning` | `false` | `gate` | Master on/off switch |
+| `gate-js-dependency-scanning` | `false` | `gate` | Master on/off switch |
 
 ## Notes
 

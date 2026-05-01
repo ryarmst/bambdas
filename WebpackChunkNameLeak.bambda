@@ -3,14 +3,14 @@ name: Webpack Internal Chunk Name Disclosed
 function: SCAN_CHECK_PASSIVE_PER_REQUEST
 location: SCANNER
 burpglobal:
-  bambda-js-dependency-scanning: false   # master on/off; set true to enable (bool)
+  gate-js-dependency-scanning: false   # master on/off; set true to enable (bool)
 source: |
   /**
    * Detects webpack bundle responses that leak an internal application or team
    * name via the webpackChunk<appname> global variable.
    **/
 
-  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-js-dependency-scanning"))) {
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.gate-js-dependency-scanning"))) {
       return AuditResult.auditResult();
   }
 

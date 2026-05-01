@@ -1,7 +1,7 @@
 ---
 name: 403 Forbidden Bypass — Comprehensive Probe Suite
 type: SCAN_CHECK_ACTIVE_PER_REQUEST
-gate: bambda-active
+gate: gate-active
 summary: Probes eight bypass categories against any 403 base response — IP spoofing (15 headers), IP encoding variants (10 alternative loopback representations), path override headers (X-Original-URL/X-Rewrite-URL), path mutations (prefix/suffix/wrap/case), HTTP method alternatives, method override headers, Referer injection, and host/protocol spoofing — reporting any 2xx result as HIGH/FIRM.
 ---
 
@@ -9,8 +9,8 @@ summary: Probes eight bypass categories against any 403 base response — IP spo
 
 | Global | Default | Type | Purpose |
 |---|---|---|---|
-| `bambda-active` | `false` | `gate` | Master gate |
-| `bypass-403-ip-value` | `127.0.0.1` | `sensitivity` | Primary loopback value injected into all IP-spoofing headers (Group A) |
+| `gate-active` | `false` | `gate` | Master gate |
+| `bypass-403-ip-value` | `127.0.0.1` | `payload` | Primary loopback value injected into all IP-spoofing headers (Group A) |
 
 ## Notes
 

@@ -3,7 +3,7 @@ name: 403 Forbidden Bypass — Comprehensive Probe Suite
 function: SCAN_CHECK_ACTIVE_PER_REQUEST
 location: SCANNER
 burpglobal:
-  bambda-active: false              # master on/off; set true to enable (bool)
+  gate-active: false              # master on/off; set true to enable (bool)
   bypass-403-ip-value: "127.0.0.1" # primary loopback value injected into IP-spoofing headers (string)
 source: |
   /**
@@ -13,7 +13,7 @@ source: |
    * spoofing against any base request returning 403. Reports any 2xx bypass as HIGH/FIRM.
    **/
 
-  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-active"))) {
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.gate-active"))) {
       return AuditResult.auditResult();
   }
 

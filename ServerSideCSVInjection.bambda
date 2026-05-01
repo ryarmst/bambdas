@@ -3,7 +3,7 @@ name: Server-Side CSV Injection — OOB Interaction Detector
 function: SCAN_CHECK_ACTIVE_PER_INSERTION_POINT
 location: SCANNER
 burpglobal:
-  bambda-oob: false               # master on/off; set true to enable (bool)
+  gate-oob: false               # master on/off; set true to enable (bool)
   ssci-oob-domain: ""             # custom OOB domain (e.g. c2.example.com); falls back to Collaborator if blank (string)
   ssci-poll-sleep-ms: 1000        # ms between Collaborator poll attempts (int)
   ssci-total-time-ms: 10000       # max total Collaborator poll time ms (int)
@@ -15,7 +15,7 @@ source: |
    * @author burp-bambdas skill
    **/
 
-  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-oob"))) {
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.gate-oob"))) {
       return AuditResult.auditResult();
   }
   final long POLL_SLEEP_MS = Long.parseLong(

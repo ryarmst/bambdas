@@ -1,7 +1,7 @@
 ---
 name: Webpack Bundle Likely-Internal Package Names
 type: SCAN_CHECK_PASSIVE_PER_REQUEST
-gate: bambda-js-dependency-scanning
+gate: gate-js-dependency-scanning
 summary: Applies naming heuristics to unscoped packages found in webpack Module Federation share-scope manifests to surface likely-internal or proprietary package names; always reports at MEDIUM/TENTATIVE due to elevated false-positive rate.
 ---
 
@@ -9,7 +9,7 @@ summary: Applies naming heuristics to unscoped packages found in webpack Module 
 
 | Global | Default | Type | Purpose |
 |---|---|---|---|
-| `bambda-js-dependency-scanning` | `false` | `gate` | Master on/off switch |
+| `gate-js-dependency-scanning` | `false` | `gate` | Master on/off switch |
 | `js-dep-max-matches` | `200` | `depth` | Cap on share-scope regex matches processed per response |
 
 ## Notes

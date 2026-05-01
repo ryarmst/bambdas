@@ -3,7 +3,7 @@ name: Anomaly-Ranked Injection Probe
 function: SCAN_CHECK_ACTIVE_PER_INSERTION_POINT
 location: SCANNER
 burpglobal:
-  bambda-fuzzing: false                    # master on/off; set true to enable (bool)
+  gate-fuzzing: false                    # master on/off; set true to enable (bool)
   anomaly-probe-wordlist: ""               # path to newline-delimited payload file; # lines ignored; falls back to built-in (string)
   anomaly-probe-rank-threshold: 5          # Gate 1: minimum anomaly rank to raise a finding (int)
   anomaly-probe-margin: 2.0                # Gate 2: top rank must be >= this multiple of the corpus median (double)
@@ -17,7 +17,7 @@ source: |
    *   Gate 2: topRank >= MIN_MARGIN_OVER_MEDIAN * median
    **/
 
-  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-fuzzing"))) {
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.gate-fuzzing"))) {
       return AuditResult.auditResult();
   }
   final int     RANK_THRESHOLD                   = Integer.parseInt(

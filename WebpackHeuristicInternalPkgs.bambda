@@ -3,7 +3,7 @@ name: Webpack Bundle Likely-Internal Package Names
 function: SCAN_CHECK_PASSIVE_PER_REQUEST
 location: SCANNER
 burpglobal:
-  bambda-js-dependency-scanning: false   # master on/off; set true to enable (bool)
+  gate-js-dependency-scanning: false   # master on/off; set true to enable (bool)
   js-dep-max-matches: 200                # cap on share-scope regex matches per response (int)
 source: |
   /**
@@ -12,7 +12,7 @@ source: |
    * Reports at TENTATIVE/MEDIUM due to elevated false-positive rate.
    **/
 
-  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-js-dependency-scanning"))) {
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.gate-js-dependency-scanning"))) {
       return AuditResult.auditResult();
   }
 

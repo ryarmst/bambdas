@@ -1,7 +1,7 @@
 ---
 name: Webpack Module Federation Share-Scope Manifest Exposed
 type: SCAN_CHECK_PASSIVE_PER_REQUEST
-gate: bambda-js-dependency-scanning
+gate: gate-js-dependency-scanning
 summary: Detects webpack 5 Module Federation share-scope manifests and reports exposed package names and versions; elevates to MEDIUM if any @scope is absent from the known-public npm scope allowlist, flagging it as a dependency confusion candidate.
 ---
 
@@ -9,7 +9,7 @@ summary: Detects webpack 5 Module Federation share-scope manifests and reports e
 
 | Global | Default | Type | Purpose |
 |---|---|---|---|
-| `bambda-js-dependency-scanning` | `false` | `gate` | Master on/off switch |
+| `gate-js-dependency-scanning` | `false` | `gate` | Master on/off switch |
 | `js-dep-cluster-threshold` | `3` | `sensitivity` | Minimum distinct package matches required to fire (prevents false positives from coincidental semver-shaped strings in unrelated minified code) |
 | `js-dep-max-matches` | `200` | `depth` | Cap on share-scope regex matches processed per response |
 

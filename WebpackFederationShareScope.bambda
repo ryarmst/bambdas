@@ -3,7 +3,7 @@ name: Webpack Module Federation Share-Scope Manifest Exposed
 function: SCAN_CHECK_PASSIVE_PER_REQUEST
 location: SCANNER
 burpglobal:
-  bambda-js-dependency-scanning: false   # master on/off; set true to enable (bool)
+  gate-js-dependency-scanning: false   # master on/off; set true to enable (bool)
   js-dep-cluster-threshold: 3            # minimum distinct packages required to fire (int)
   js-dep-max-matches: 200                # cap on share-scope regex matches per response (int)
 source: |
@@ -13,7 +13,7 @@ source: |
    * npm scope allowlist as a dependency-confusion candidate.
    **/
 
-  if (!"true".equalsIgnoreCase(System.getProperty("bg.bambda-js-dependency-scanning"))) {
+  if (!"true".equalsIgnoreCase(System.getProperty("bg.gate-js-dependency-scanning"))) {
       return AuditResult.auditResult();
   }
 

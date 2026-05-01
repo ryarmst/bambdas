@@ -20,16 +20,17 @@ extract() {
 }
 
 {
-    echo "| Name | Type | Summary |"
-    echo "|---|---|---|"
+    echo "| Name | Type | Gate | Summary |"
+    echo "|---|---|---|---|"
     for bambda in *.bambda; do
         base="${bambda%.bambda}"
         md="${base}.md"
         [[ -f "$md" ]] || continue
         name=$(extract "$md" "name")
         type=$(extract "$md" "type")
+        gate=$(extract "$md" "gate")
         summary=$(extract "$md" "summary")
-        echo "| $name | \`$type\` | $summary |"
+        echo "| $name | \`$type\` | \`$gate\` | $summary |"
     done
 } > "$TMPFILE"
 
